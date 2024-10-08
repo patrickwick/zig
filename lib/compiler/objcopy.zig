@@ -1706,27 +1706,102 @@ test "Split option" {
     try std.testing.expectEqual(null, splitOption("abc"));
 }
 
+// TODO: integrate into objcopy code
+// Stores the parsed header with e_ident from the input file ELF header that is only partially parsed by std.elf.Header.parse.
+// Does not support different target endianness than native endianness.
+// Does not support non-zero e_flags.
+const ElfHeader = struct {
+    e_ident: [std.elf.EI_NIDENT]u8,
+    parsed_header: std.elf.Header,
+
+    pub fn toEhdr(self: *const @This()) !std.elf.Ehdr {
+        const e = std.elf;
+
+        // validate that the parsed fields have not diverged from e_ident
+        const endian: std.builtin.Endian = switch (self.e_ident[e.EI_DATA]) {
+            e.ELFDATA2LSB => .little,
+            e.ELFDATA2MSB => .big,
+            else => return error.InvalidElfEndian,
+        };
+        assert(endian == self.parsed_header.endian);
+
+        const e_ident_is_64 = switch (self.e_ident[e.EI_CLASS]) {
+            e.ELFCLASS64 => true,
+            e.ELFCLASS32 => false,
+            else => return error.InvalidElfHeader,
+        };
+        assert(e_ident_is_64 == self.parsed_header.is_64);
+
+        const e_version = self.e_ident[e.EI_VERSION];
+        assert(e_version == e.EV_CURRENT);
+
+        const os_abi: e.OSABI = @enumFromInt(self.e_ident[e.EI_OSABI]);
+        assert(os_abi == self.parsed_header.os_abi);
+
+        const abi_version = self.e_ident[e.EI_ABIVERSION];
+        assert(abi_version == self.parsed_header.abi_version);
+
+        // EI_PAD should be all zero
+        assert(std.mem.eql(u8, self.e_ident[9..], &[_]u8{0} ** 7));
+
+        // TODO: swap bytes of all fields including e_ident if native endian does not match
+        const native_endian = @import("builtin").target.cpu.arch.endian();
+        if (endian != native_endian) return error.InvalidElfEndian;
+
+        const e_flags = 0; // no EF_ flags supported
+
+        return e.Ehdr{
+            .e_ident = self.e_ident,
+            .e_type = self.parsed_header.type,
+            .e_machine = self.parsed_header.machine,
+            .e_version = e_version,
+            .e_entry = self.parsed_header.entry,
+            .e_phoff = self.parsed_header.phoff,
+            .e_shoff = self.parsed_header.shoff,
+            .e_flags = e_flags,
+            .e_ehsize = @sizeOf(e.Ehdr),
+            .e_phentsize = self.parsed_header.phentsize,
+            .e_phnum = self.parsed_header.phnum,
+            .e_shentsize = self.parsed_header.shentsize,
+            .e_shnum = self.parsed_header.shnum,
+            .e_shstrndx = self.parsed_header.shstrndx,
+        };
+    }
+};
+
 test "Strip ELF" {
     const allocator = std.testing.allocator;
 
-    const program_header_table_offset = 512;
+    // Current objcopy limitations:
+    // * program header table must be placed right after the ELF header (e_phoff = @sizeOf(Ehdr))
+    // * all sections must be ordered by their asending file offset (sh_offset)
+    // * target endianness must be the native endianness
+    const program_header_table_offset = @sizeOf(std.elf.Ehdr);
     const program_header_count = 0;
-    const section_header_table_offset = @sizeOf(std.elf.Ehdr);
+    const section_header_table_offset = program_header_table_offset + program_header_count * @sizeOf(std.elf.Phdr);
     const section_header_count = 1; // null section
     const section_name_string_table_index = 0;
 
-    const elf_header = std.elf.Header{
-        .endian = .little,
-        .machine = .X86_64,
-        .is_64 = true,
-        .entry = 0,
-        .phoff = program_header_table_offset,
-        .shoff = section_header_table_offset,
-        .phentsize = @sizeOf(std.elf.Elf64_Phdr),
-        .phnum = program_header_count,
-        .shentsize = @sizeOf(std.elf.Elf64_Shdr),
-        .shnum = section_header_count,
-        .shstrndx = section_name_string_table_index,
+    const e_ident = std.elf.MAGIC ++ [_]u8{std.elf.ELFCLASS64} ++ [_]u8{std.elf.ELFDATA2LSB} ++ [_]u8{std.elf.EV_CURRENT} ++ [_]u8{@intFromEnum(std.elf.OSABI.GNU)} ++ [_]u8{0} ++ [_]u8{0} ** 7;
+
+    const elf_header = ElfHeader{
+        .e_ident = e_ident.*,
+        .parsed_header = .{
+            .is_64 = true,
+            .endian = .little,
+            .os_abi = std.elf.OSABI.GNU,
+            .abi_version = 0,
+            .type = std.elf.ET.EXEC,
+            .machine = .X86_64,
+            .entry = 0,
+            .phoff = program_header_table_offset,
+            .shoff = section_header_table_offset,
+            .phentsize = @sizeOf(std.elf.Elf64_Phdr),
+            .phnum = program_header_count,
+            .shentsize = @sizeOf(std.elf.Elf64_Shdr),
+            .shnum = section_header_count,
+            .shstrndx = section_name_string_table_index,
+        },
     };
 
     var in_buffer = [_]u8{0} ** 128;
@@ -1735,21 +1810,17 @@ test "Strip ELF" {
     var out_buffer = [_]u8{0} ** 128;
     var out_buffer_stream = std.io.FixedBufferStream([]u8){ .buffer = &out_buffer, .pos = 0 };
 
-    // input
+    // input ELF
     {
         const in_buffer_writer = in_buffer_stream.writer();
-
-        // TODO: stripElf uses the parsed header but also reads it from the file again
-        // => add serialize header to std.elf.Header. Keeping both header states in sync is a major headache
-        const elf_header_raw = [_]u8{0} ** @sizeOf(std.elf.Ehdr);
-        try in_buffer_writer.writeAll(&elf_header_raw);
+        try in_buffer_writer.writeStruct(try elf_header.toEhdr());
 
         const null_section_header = [_]u8{0} ** @sizeOf(std.elf.Shdr);
         try in_buffer_writer.writeAll(&null_section_header);
     }
 
     try in_buffer_stream.seekTo(0);
-    try stripElf(allocator, &in_buffer_stream, &out_buffer_stream, elf_header, .{
+    try stripElf(allocator, &in_buffer_stream, &out_buffer_stream, elf_header.parsed_header, .{
         .strip_debug = false,
         .strip_all = false,
         .only_keep_debug = false,

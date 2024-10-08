@@ -698,6 +698,8 @@ pub const EI_PAD = 9;
 
 pub const EI_NIDENT = 16;
 
+pub const EV_CURRENT = 1;
+
 pub const Elf32_Half = u16;
 pub const Elf64_Half = u16;
 pub const Elf32_Word = u32;
