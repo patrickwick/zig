@@ -749,11 +749,16 @@ const StripElfOptions = struct {
 
 fn stripElf(
     allocator: Allocator,
-    in_file: File,
-    out_file: File,
+    in_file: anytype,
+    out_file: anytype,
     elf_hdr: elf.Header,
     options: StripElfOptions,
 ) !void {
+    comptime assert(std.meta.hasMethod(@TypeOf(in_file), "seekableStream"));
+    comptime assert(std.meta.hasMethod(@TypeOf(in_file), "reader"));
+    comptime assert(std.meta.hasMethod(@TypeOf(out_file), "seekableStream"));
+    comptime assert(std.meta.hasMethod(@TypeOf(out_file), "writer"));
+
     const Filter = ElfFileHelper.Filter;
     const DebugLink = ElfFileHelper.DebugLink;
 
@@ -853,14 +858,21 @@ fn ElfFile(comptime is_64: bool) type {
 
         const Self = @This();
 
-        pub fn parse(gpa: Allocator, in_file: File, header: elf.Header) !Self {
+        pub fn parse(gpa: Allocator, in_file: anytype, header: elf.Header) !Self {
+            comptime assert(std.meta.hasMethod(@TypeOf(in_file), "seekableStream"));
+            comptime assert(std.meta.hasMethod(@TypeOf(in_file), "reader"));
+
             var arena = std.heap.ArenaAllocator.init(gpa);
             errdefer arena.deinit();
             const allocator = arena.allocator();
 
+            const reader = in_file.reader();
+            const stream = in_file.seekableStream();
+
             var raw_header: Elf_Ehdr = undefined;
             {
-                const bytes_read = try in_file.preadAll(std.mem.asBytes(&raw_header), 0);
+                try stream.seekTo(0);
+                const bytes_read = try reader.readAll(std.mem.asBytes(&raw_header));
                 if (bytes_read < @sizeOf(Elf_Ehdr))
                     return error.TRUNCATED_ELF;
             }
@@ -871,7 +883,8 @@ fn ElfFile(comptime is_64: bool) type {
                     fatal("zig objcopy: unsupported ELF file, unexpected phentsize ({d})", .{header.phentsize});
 
                 const program_header = try allocator.alloc(Elf_Phdr, header.phnum);
-                const bytes_read = try in_file.preadAll(std.mem.sliceAsBytes(program_header), header.phoff);
+                try stream.seekTo(header.phoff);
+                const bytes_read = try reader.readAll(std.mem.sliceAsBytes(program_header));
                 if (bytes_read < @sizeOf(Elf_Phdr) * header.phnum)
                     return error.TRUNCATED_ELF;
                 break :blk program_header;
@@ -886,7 +899,8 @@ fn ElfFile(comptime is_64: bool) type {
 
                 const raw_section_header = try allocator.alloc(Elf_Shdr, header.shnum);
                 defer allocator.free(raw_section_header);
-                const bytes_read = try in_file.preadAll(std.mem.sliceAsBytes(raw_section_header), header.shoff);
+                try stream.seekTo(header.shoff);
+                const bytes_read = try reader.readAll(std.mem.sliceAsBytes(raw_section_header));
                 if (bytes_read < @sizeOf(Elf_Phdr) * header.shnum)
                     return error.TRUNCATED_ELF;
 
@@ -909,7 +923,8 @@ fn ElfFile(comptime is_64: bool) type {
 
                 if (need_data or need_strings) {
                     const buffer = try allocator.alignedAlloc(u8, section_memory_align, @intCast(section.section.sh_size));
-                    const bytes_read = try in_file.preadAll(buffer, section.section.sh_offset);
+                    try stream.seekTo(section.section.sh_offset);
+                    const bytes_read = try reader.readAll(buffer);
                     if (bytes_read != section.section.sh_size) return error.TRUNCATED_ELF;
                     section.payload = buffer;
                 }
@@ -982,7 +997,12 @@ fn ElfFile(comptime is_64: bool) type {
             set_section_alignment: ?SetSectionAlignment = null,
             set_section_flags: ?SetSectionFlags = null,
         };
-        fn emit(self: *const Self, gpa: Allocator, out_file: File, in_file: File, options: EmitElfOptions) !void {
+        fn emit(self: *const Self, gpa: Allocator, out_file: anytype, in_file: anytype, options: EmitElfOptions) !void {
+            comptime assert(std.meta.hasMethod(@TypeOf(in_file), "seekableStream"));
+            comptime assert(std.meta.hasMethod(@TypeOf(in_file), "reader"));
+            comptime assert(std.meta.hasMethod(@TypeOf(out_file), "seekableStream"));
+            comptime assert(std.meta.hasMethod(@TypeOf(out_file), "writer"));
+
             var arena = std.heap.ArenaAllocator.init(gpa);
             defer arena.deinit();
             const allocator = arena.allocator();
@@ -1426,7 +1446,12 @@ const ElfFileHelper = struct {
         copy_range: struct { in_offset: u64, len: u64, out_offset: u64 },
         write_data: struct { data: []const u8, out_offset: u64 },
     };
-    fn write(allocator: Allocator, out_file: File, in_file: File, cmds: []const WriteCmd) !void {
+    fn write(allocator: Allocator, out_file: anytype, in_file: anytype, cmds: []const WriteCmd) !void {
+        comptime assert(std.meta.hasMethod(@TypeOf(in_file), "seekableStream"));
+        comptime assert(std.meta.hasMethod(@TypeOf(in_file), "reader"));
+        comptime assert(std.meta.hasMethod(@TypeOf(out_file), "seekableStream"));
+        comptime assert(std.meta.hasMethod(@TypeOf(out_file), "writer"));
+
         // consolidate holes between writes:
         //   by coping original padding data from in_file (by fusing contiguous ranges)
         //   by writing zeroes otherwise
@@ -1481,21 +1506,31 @@ const ElfFileHelper = struct {
         for (consolidated.items) |cmd| {
             switch (cmd) {
                 .write_data => |data| {
-                    var iovec = [_]std.posix.iovec_const{.{ .base = data.data.ptr, .len = data.data.len }};
-                    try out_file.pwritevAll(&iovec, data.out_offset);
+                    // var iovec = [_]std.posix.iovec_const{.{ .base = data.data.ptr, .len = data.data.len }};
+                    // try out_file.pwritevAll(&iovec, data.out_offset);
+                    try out_file.seekableStream().seekTo(data.out_offset);
+                    try out_file.writer().writeAll(data.data);
                 },
                 .copy_range => |range| {
-                    const copied_bytes = try in_file.copyRangeAll(range.in_offset, out_file, range.out_offset, range.len);
-                    if (copied_bytes < range.len) return error.TRUNCATED_ELF;
+                    try in_file.seekableStream().seekTo(range.in_offset);
+                    const data = try in_file.reader().readAllAlloc(allocator, std.math.maxInt(usize));
+                    if (data.len < range.len) return error.TRUNCATED_ELF;
+
+                    try out_file.seekableStream().seekTo(range.out_offset);
+                    try out_file.writer().writeAll(data);
                 },
             }
         }
     }
 
-    fn tryCompressSection(allocator: Allocator, in_file: File, offset: u64, size: u64, prefix: []const u8) !?[]align(8) const u8 {
+    fn tryCompressSection(allocator: Allocator, in_file: anytype, offset: u64, size: u64, prefix: []const u8) !?[]align(8) const u8 {
+        comptime assert(std.meta.hasMethod(@TypeOf(in_file), "seekableStream"));
+        comptime assert(std.meta.hasMethod(@TypeOf(in_file), "reader"));
+
         if (size < prefix.len) return null;
 
-        try in_file.seekTo(offset);
+        const stream = in_file.seekableStream();
+        try stream.seekTo(offset);
         var section_reader = std.io.limitedReader(in_file.reader(), size);
 
         // allocate as large as decompressed data. if the compression doesn't fit, keep the data uncompressed.
@@ -1669,4 +1704,60 @@ test "Split option" {
     try std.testing.expectEqual(null, splitOption("=abc"));
     try std.testing.expectEqual(null, splitOption("abc="));
     try std.testing.expectEqual(null, splitOption("abc"));
+}
+
+test "Strip ELF" {
+    const allocator = std.testing.allocator;
+
+    const program_header_table_offset = 512;
+    const program_header_count = 0;
+    const section_header_table_offset = @sizeOf(std.elf.Ehdr);
+    const section_header_count = 1; // null section
+    const section_name_string_table_index = 0;
+
+    const elf_header = std.elf.Header{
+        .endian = .little,
+        .machine = .X86_64,
+        .is_64 = true,
+        .entry = 0,
+        .phoff = program_header_table_offset,
+        .shoff = section_header_table_offset,
+        .phentsize = @sizeOf(std.elf.Elf64_Phdr),
+        .phnum = program_header_count,
+        .shentsize = @sizeOf(std.elf.Elf64_Shdr),
+        .shnum = section_header_count,
+        .shstrndx = section_name_string_table_index,
+    };
+
+    var in_buffer = [_]u8{0} ** 128;
+    var in_buffer_stream = std.io.FixedBufferStream([]u8){ .buffer = &in_buffer, .pos = 0 };
+
+    var out_buffer = [_]u8{0} ** 128;
+    var out_buffer_stream = std.io.FixedBufferStream([]u8){ .buffer = &out_buffer, .pos = 0 };
+
+    // input
+    {
+        const in_buffer_writer = in_buffer_stream.writer();
+
+        // TODO: stripElf uses the parsed header but also reads it from the file again
+        // => add serialize header to std.elf.Header. Keeping both header states in sync is a major headache
+        const elf_header_raw = [_]u8{0} ** @sizeOf(std.elf.Ehdr);
+        try in_buffer_writer.writeAll(&elf_header_raw);
+
+        const null_section_header = [_]u8{0} ** @sizeOf(std.elf.Shdr);
+        try in_buffer_writer.writeAll(&null_section_header);
+    }
+
+    try in_buffer_stream.seekTo(0);
+    try stripElf(allocator, &in_buffer_stream, &out_buffer_stream, elf_header, .{
+        .strip_debug = false,
+        .strip_all = false,
+        .only_keep_debug = false,
+        .add_debuglink = null,
+        .extract_to = null,
+        .compress_debug = false,
+        .add_section = null,
+        .set_section_alignment = null,
+        .set_section_flags = null,
+    });
 }
