@@ -154,6 +154,12 @@ fn cmdObjCopy(
         else => fatal("unable to read '{s}': {s}", .{ input, @errorName(err) }),
     };
 
+    // e_ident data is not stored in the parsed std.elf.Header struct but is required
+    var e_ident: [elf.EI_NIDENT]u8 = undefined;
+    const bytes_read = in_file.preadAll(&e_ident, 0) catch |err| fatal("unable to read '{s}': {s}", .{ input, @errorName(err) });
+    if (bytes_read < elf.EI_NIDENT) fatal("not an ELF file: '{s}'", .{input});
+    const elf_header = ElfHeader{ .e_ident = e_ident, .parsed = elf_hdr };
+
     const in_ofmt = .elf;
 
     const out_fmt: std.Target.ObjectFormat = opt_out_fmt orelse ofmt: {
@@ -192,7 +198,7 @@ fn cmdObjCopy(
             if (set_section_flags != null)
                 fatal("zig objcopy: ELF to RAW or HEX copying does not support --set_section_flags", .{});
 
-            try emitElf(arena, in_file, out_file, elf_hdr, .{
+            try emitElf(arena, in_file, out_file, elf_header.parsed, .{
                 .ofmt = out_fmt,
                 .only_section = only_section,
                 .pad_to = pad_to,
@@ -208,7 +214,7 @@ fn cmdObjCopy(
             if (pad_to) |_|
                 fatal("zig objcopy: ELF to ELF copying does not support --pad-to", .{});
 
-            try stripElf(arena, in_file, out_file, elf_hdr, .{
+            try stripElf(arena, in_file, out_file, elf_header, .{
                 .strip_debug = strip_debug,
                 .strip_all = strip_all,
                 .only_keep_debug = only_keep_debug,
@@ -751,7 +757,7 @@ fn stripElf(
     allocator: Allocator,
     in_file: anytype,
     out_file: anytype,
-    elf_hdr: elf.Header,
+    elf_header: ElfHeader,
     options: StripElfOptions,
 ) !void {
     comptime assert(std.meta.hasMethod(@TypeOf(in_file), "seekableStream"));
@@ -788,9 +794,9 @@ fn stripElf(
         break :path null;
     };
 
-    switch (elf_hdr.is_64) {
+    switch (elf_header.parsed.is_64) {
         inline else => |is_64| {
-            var elf_file = try ElfFile(is_64).parse(allocator, in_file, elf_hdr);
+            var elf_file = try ElfFile(is_64).parse(allocator, in_file, elf_header);
             defer elf_file.deinit();
 
             if (options.add_section) |user_section| {
@@ -841,7 +847,7 @@ fn ElfFile(comptime is_64: bool) type {
     const Elf_OffSize = if (is_64) elf.Elf64_Off else elf.Elf32_Off;
 
     return struct {
-        raw_elf_header: Elf_Ehdr,
+        header: ElfHeader,
         program_segments: []const Elf_Phdr,
         sections: []const Section,
         arena: std.heap.ArenaAllocator,
@@ -858,7 +864,7 @@ fn ElfFile(comptime is_64: bool) type {
 
         const Self = @This();
 
-        pub fn parse(gpa: Allocator, in_file: anytype, header: elf.Header) !Self {
+        pub fn parse(gpa: Allocator, in_file: anytype, header: ElfHeader) !Self {
             comptime assert(std.meta.hasMethod(@TypeOf(in_file), "seekableStream"));
             comptime assert(std.meta.hasMethod(@TypeOf(in_file), "reader"));
 
@@ -869,39 +875,31 @@ fn ElfFile(comptime is_64: bool) type {
             const reader = in_file.reader();
             const stream = in_file.seekableStream();
 
-            var raw_header: Elf_Ehdr = undefined;
-            {
-                try stream.seekTo(0);
-                const bytes_read = try reader.readAll(std.mem.asBytes(&raw_header));
-                if (bytes_read < @sizeOf(Elf_Ehdr))
-                    return error.TRUNCATED_ELF;
-            }
-
             // program header: list of segments
             const program_segments = blk: {
-                if (@sizeOf(Elf_Phdr) != header.phentsize)
-                    fatal("zig objcopy: unsupported ELF file, unexpected phentsize ({d})", .{header.phentsize});
+                if (@sizeOf(Elf_Phdr) != header.parsed.phentsize)
+                    fatal("zig objcopy: unsupported ELF file, unexpected phentsize ({d})", .{header.parsed.phentsize});
 
-                const program_header = try allocator.alloc(Elf_Phdr, header.phnum);
-                try stream.seekTo(header.phoff);
+                const program_header = try allocator.alloc(Elf_Phdr, header.parsed.phnum);
+                try stream.seekTo(header.parsed.phoff);
                 const bytes_read = try reader.readAll(std.mem.sliceAsBytes(program_header));
-                if (bytes_read < @sizeOf(Elf_Phdr) * header.phnum)
+                if (bytes_read < @sizeOf(Elf_Phdr) * header.parsed.phnum)
                     return error.TRUNCATED_ELF;
                 break :blk program_header;
             };
 
             // section header
             const sections = blk: {
-                if (@sizeOf(Elf_Shdr) != header.shentsize)
-                    fatal("zig objcopy: unsupported ELF file, unexpected shentsize ({d})", .{header.shentsize});
+                if (@sizeOf(Elf_Shdr) != header.parsed.shentsize)
+                    fatal("zig objcopy: unsupported ELF file, unexpected shentsize ({d})", .{header.parsed.shentsize});
 
-                const section_header = try allocator.alloc(Section, header.shnum);
+                const section_header = try allocator.alloc(Section, header.parsed.shnum);
 
-                const raw_section_header = try allocator.alloc(Elf_Shdr, header.shnum);
+                const raw_section_header = try allocator.alloc(Elf_Shdr, header.parsed.shnum);
                 defer allocator.free(raw_section_header);
-                try stream.seekTo(header.shoff);
+                try stream.seekTo(header.parsed.shoff);
                 const bytes_read = try reader.readAll(std.mem.sliceAsBytes(raw_section_header));
-                if (bytes_read < @sizeOf(Elf_Phdr) * header.shnum)
+                if (bytes_read < @sizeOf(Elf_Phdr) * header.parsed.shnum)
                     return error.TRUNCATED_ELF;
 
                 for (section_header, raw_section_header) |*section, hdr| {
@@ -919,7 +917,7 @@ fn ElfFile(comptime is_64: bool) type {
                     elf.SHT_SYMTAB, elf.SHT_DYNSYM => true,
                     else => false,
                 };
-                const need_strings = (idx == header.shstrndx);
+                const need_strings = (idx == header.parsed.shstrndx);
 
                 if (need_data or need_strings) {
                     const buffer = try allocator.alignedAlloc(u8, section_memory_align, @intCast(section.section.sh_size));
@@ -939,8 +937,8 @@ fn ElfFile(comptime is_64: bool) type {
                     if (sectionWithinSegment(section.section, seg.*)) break seg;
                 } else null;
 
-                if (section.section.sh_name != 0 and header.shstrndx != elf.SHN_UNDEF)
-                    section.name = std.mem.span(@as([*:0]const u8, @ptrCast(&sections[header.shstrndx].payload.?[section.section.sh_name])));
+                if (section.section.sh_name != 0 and header.parsed.shstrndx != elf.SHN_UNDEF)
+                    section.name = std.mem.span(@as([*:0]const u8, @ptrCast(&sections[header.parsed.shstrndx].payload.?[section.section.sh_name])));
 
                 const category_from_program: SectionCategory = if (section.segment != null) .exe else .debug;
                 section.category = switch (section.section.sh_type) {
@@ -959,8 +957,8 @@ fn ElfFile(comptime is_64: bool) type {
             }
 
             sections[0].category = .common; // mandatory null section
-            if (header.shstrndx != elf.SHN_UNDEF)
-                sections[header.shstrndx].category = .common; // string table for the headers
+            if (header.parsed.shstrndx != elf.SHN_UNDEF)
+                sections[header.parsed.shstrndx].category = .common; // string table for the headers
 
             // recursively propagate section categories to their linked sections, so that they are kept together
             var dirty: u1 = 1;
@@ -976,8 +974,8 @@ fn ElfFile(comptime is_64: bool) type {
             }
 
             return Self{
+                .header = header,
                 .arena = arena,
-                .raw_elf_header = raw_header,
                 .program_segments = program_segments,
                 .sections = sections,
             };
@@ -1046,14 +1044,16 @@ fn ElfFile(comptime is_64: bool) type {
                 break :blk next_idx;
             };
 
+            const shstrndx = self.header.parsed.shstrndx;
+
             // add a ".gnu_debuglink" to the string table if needed
             const debuglink_name: u32 = blk: {
                 if (options.debuglink == null) break :blk elf.SHN_UNDEF;
-                if (self.raw_elf_header.e_shstrndx == elf.SHN_UNDEF)
+                if (shstrndx == elf.SHN_UNDEF)
                     fatal("zig objcopy: no strtab, cannot add the debuglink section", .{}); // TODO add the section if needed?
 
-                const strtab = &self.sections[self.raw_elf_header.e_shstrndx];
-                const update = &sections_update[self.raw_elf_header.e_shstrndx];
+                const strtab = &self.sections[shstrndx];
+                const update = &sections_update[shstrndx];
 
                 const name: []const u8 = ".gnu_debuglink";
                 const new_offset: u32 = @intCast(strtab.payload.?.len);
@@ -1071,11 +1071,11 @@ fn ElfFile(comptime is_64: bool) type {
             // add user section to the string table if needed
             const user_section_name: u32 = blk: {
                 if (options.add_section == null) break :blk elf.SHN_UNDEF;
-                if (self.raw_elf_header.e_shstrndx == elf.SHN_UNDEF)
+                if (shstrndx == elf.SHN_UNDEF)
                     fatal("zig objcopy: no strtab, cannot add the user section", .{}); // TODO add the section if needed?
 
-                const strtab = &self.sections[self.raw_elf_header.e_shstrndx];
-                const update = &sections_update[self.raw_elf_header.e_shstrndx];
+                const strtab = &self.sections[shstrndx];
+                const update = &sections_update[shstrndx];
 
                 const name = options.add_section.?.section_name;
                 const new_offset: u32 = @intCast(strtab.payload.?.len);
@@ -1121,20 +1121,24 @@ fn ElfFile(comptime is_64: bool) type {
 
             // build the updated headers
             // nb: updated_elf_header will be updated before the actual write
-            var updated_elf_header = self.raw_elf_header;
-            if (updated_elf_header.e_shstrndx != elf.SHN_UNDEF)
-                updated_elf_header.e_shstrndx = sections_update[updated_elf_header.e_shstrndx].remap_idx;
-            cmdbuf.appendAssumeCapacity(.{ .write_data = .{ .data = std.mem.asBytes(&updated_elf_header), .out_offset = 0 } });
+            var updated_elf_header = self.header;
+            if (updated_elf_header.parsed.shstrndx != elf.SHN_UNDEF)
+                updated_elf_header.parsed.shstrndx = sections_update[updated_elf_header.parsed.shstrndx].remap_idx;
+            const updated_elf_header_data = try updated_elf_header.toEhdr();
+            cmdbuf.appendAssumeCapacity(.{ .write_data = .{ .data = std.mem.asBytes(&updated_elf_header_data), .out_offset = 0 } });
             eof_offset = @sizeOf(Elf_Ehdr);
 
             // program header as-is.
             // nb: for only-debug files, removing it appears to work, but is invalid by ELF specifcation.
             {
-                assert(updated_elf_header.e_phoff == @sizeOf(Elf_Ehdr));
+                assert(updated_elf_header.parsed.phoff == @sizeOf(Elf_Ehdr));
                 const data = std.mem.sliceAsBytes(self.program_segments);
-                assert(data.len == @as(usize, updated_elf_header.e_phentsize) * updated_elf_header.e_phnum);
-                cmdbuf.appendAssumeCapacity(.{ .write_data = .{ .data = data, .out_offset = updated_elf_header.e_phoff } });
-                eof_offset = updated_elf_header.e_phoff + @as(Elf_OffSize, @intCast(data.len));
+                assert(data.len == @as(usize, updated_elf_header.parsed.phentsize) * updated_elf_header.parsed.phnum);
+                cmdbuf.appendAssumeCapacity(.{ .write_data = .{ .data = data, .out_offset = updated_elf_header.parsed.phoff } });
+
+                const offset = updated_elf_header.parsed.phoff + data.len;
+                assert(offset < std.math.maxInt(Elf_OffSize));
+                eof_offset = @truncate(offset);
             }
 
             // update sections and queue payload writes
@@ -1297,10 +1301,10 @@ fn ElfFile(comptime is_64: bool) type {
 
             // --set-section-alignment: overwrite alignment
             if (options.set_section_alignment) |set_align| {
-                if (self.raw_elf_header.e_shstrndx == elf.SHN_UNDEF)
+                if (shstrndx == elf.SHN_UNDEF)
                     fatal("zig objcopy: no strtab, cannot add the user section", .{}); // TODO add the section if needed?
 
-                const strtab = &sections_update[self.raw_elf_header.e_shstrndx];
+                const strtab = &sections_update[shstrndx];
                 for (updated_section_header) |*section| {
                     const section_name = std.mem.span(@as([*:0]const u8, @ptrCast(&strtab.payload.?[section.sh_name])));
                     if (std.mem.eql(u8, section_name, set_align.section_name)) {
@@ -1312,10 +1316,10 @@ fn ElfFile(comptime is_64: bool) type {
 
             // --set-section-flags: overwrite flags
             if (options.set_section_flags) |set_flags| {
-                if (self.raw_elf_header.e_shstrndx == elf.SHN_UNDEF)
+                if (shstrndx == elf.SHN_UNDEF)
                     fatal("zig objcopy: no strtab, cannot add the user section", .{}); // TODO add the section if needed?
 
-                const strtab = &sections_update[self.raw_elf_header.e_shstrndx];
+                const strtab = &sections_update[shstrndx];
                 for (updated_section_header) |*section| {
                     const section_name = std.mem.span(@as([*:0]const u8, @ptrCast(&strtab.payload.?[section.sh_name])));
                     if (std.mem.eql(u8, section_name, set_flags.section_name)) {
@@ -1344,7 +1348,7 @@ fn ElfFile(comptime is_64: bool) type {
                         if (f.code) section.sh_flags |= std.elf.SHF_EXECINSTR;
                         if (f.exclude) section.sh_flags |= std.elf.SHF_EXCLUDE;
                         if (f.large) {
-                            if (updated_elf_header.e_machine != std.elf.EM.X86_64)
+                            if (updated_elf_header.parsed.machine != std.elf.EM.X86_64)
                                 fatal("zig objcopy: 'large' section flag is only supported on x86_64 targets", .{});
                             section.sh_flags |= std.elf.SHF_X86_64_LARGE;
                         }
@@ -1364,11 +1368,11 @@ fn ElfFile(comptime is_64: bool) type {
                 const offset = std.mem.alignForward(Elf_OffSize, eof_offset, @alignOf(Elf_Shdr));
 
                 const data = std.mem.sliceAsBytes(updated_section_header);
-                assert(data.len == @as(usize, updated_elf_header.e_shentsize) * new_shnum);
-                updated_elf_header.e_shoff = offset;
-                updated_elf_header.e_shnum = new_shnum;
+                assert(data.len == @as(usize, updated_elf_header.parsed.shentsize) * new_shnum);
+                updated_elf_header.parsed.shoff = offset;
+                updated_elf_header.parsed.shnum = new_shnum;
 
-                cmdbuf.appendAssumeCapacity(.{ .write_data = .{ .data = data, .out_offset = updated_elf_header.e_shoff } });
+                cmdbuf.appendAssumeCapacity(.{ .write_data = .{ .data = data, .out_offset = updated_elf_header.parsed.shoff } });
             }
 
             try ElfFileHelper.write(allocator, out_file, in_file, cmdbuf.items);
@@ -1380,6 +1384,68 @@ fn ElfFile(comptime is_64: bool) type {
         }
     };
 }
+
+// Stores the parsed header with e_ident from the input file ELF header that is only partially parsed by std.elf.Header.parse.
+// Does not support different target endianness than native endianness.
+// Does not support non-zero e_flags.
+const ElfHeader = struct {
+    e_ident: [std.elf.EI_NIDENT]u8,
+    parsed: std.elf.Header,
+
+    pub fn toEhdr(self: *const @This()) !std.elf.Ehdr {
+        const e = std.elf;
+
+        // validate that the parsed fields have not diverged from e_ident
+        const endian: std.builtin.Endian = switch (self.e_ident[e.EI_DATA]) {
+            e.ELFDATA2LSB => .little,
+            e.ELFDATA2MSB => .big,
+            else => return error.InvalidElfEndian,
+        };
+        assert(endian == self.parsed.endian);
+
+        const e_ident_is_64 = switch (self.e_ident[e.EI_CLASS]) {
+            e.ELFCLASS64 => true,
+            e.ELFCLASS32 => false,
+            else => return error.InvalidElfHeader,
+        };
+        assert(e_ident_is_64 == self.parsed.is_64);
+
+        const e_version = self.e_ident[e.EI_VERSION];
+        assert(e_version == e.EV_CURRENT);
+
+        const os_abi: e.OSABI = @enumFromInt(self.e_ident[e.EI_OSABI]);
+        assert(os_abi == self.parsed.os_abi);
+
+        const abi_version = self.e_ident[e.EI_ABIVERSION];
+        assert(abi_version == self.parsed.abi_version);
+
+        // EI_PAD should be all zero
+        assert(std.mem.eql(u8, self.e_ident[9..], &[_]u8{0} ** 7));
+
+        // TODO: swap bytes of all fields including e_ident if native endian does not match
+        const native_endian = @import("builtin").target.cpu.arch.endian();
+        if (endian != native_endian) return error.InvalidElfEndian;
+
+        const e_flags = 0; // no EF_ flags supported
+
+        return e.Ehdr{
+            .e_ident = self.e_ident,
+            .e_type = self.parsed.type,
+            .e_machine = self.parsed.machine,
+            .e_version = e_version,
+            .e_entry = self.parsed.entry,
+            .e_phoff = self.parsed.phoff,
+            .e_shoff = self.parsed.shoff,
+            .e_flags = e_flags,
+            .e_ehsize = @sizeOf(e.Ehdr),
+            .e_phentsize = self.parsed.phentsize,
+            .e_phnum = self.parsed.phnum,
+            .e_shentsize = self.parsed.shentsize,
+            .e_shnum = self.parsed.shnum,
+            .e_shstrndx = self.parsed.shstrndx,
+        };
+    }
+};
 
 const ElfFileHelper = struct {
     const DebugLink = struct { name: []const u8, crc32: u32 };
@@ -1506,8 +1572,6 @@ const ElfFileHelper = struct {
         for (consolidated.items) |cmd| {
             switch (cmd) {
                 .write_data => |data| {
-                    // var iovec = [_]std.posix.iovec_const{.{ .base = data.data.ptr, .len = data.data.len }};
-                    // try out_file.pwritevAll(&iovec, data.out_offset);
                     try out_file.seekableStream().seekTo(data.out_offset);
                     try out_file.writer().writeAll(data.data);
                 },
@@ -1706,70 +1770,7 @@ test "Split option" {
     try std.testing.expectEqual(null, splitOption("abc"));
 }
 
-// TODO: integrate into objcopy code
-// Stores the parsed header with e_ident from the input file ELF header that is only partially parsed by std.elf.Header.parse.
-// Does not support different target endianness than native endianness.
-// Does not support non-zero e_flags.
-const ElfHeader = struct {
-    e_ident: [std.elf.EI_NIDENT]u8,
-    parsed_header: std.elf.Header,
-
-    pub fn toEhdr(self: *const @This()) !std.elf.Ehdr {
-        const e = std.elf;
-
-        // validate that the parsed fields have not diverged from e_ident
-        const endian: std.builtin.Endian = switch (self.e_ident[e.EI_DATA]) {
-            e.ELFDATA2LSB => .little,
-            e.ELFDATA2MSB => .big,
-            else => return error.InvalidElfEndian,
-        };
-        assert(endian == self.parsed_header.endian);
-
-        const e_ident_is_64 = switch (self.e_ident[e.EI_CLASS]) {
-            e.ELFCLASS64 => true,
-            e.ELFCLASS32 => false,
-            else => return error.InvalidElfHeader,
-        };
-        assert(e_ident_is_64 == self.parsed_header.is_64);
-
-        const e_version = self.e_ident[e.EI_VERSION];
-        assert(e_version == e.EV_CURRENT);
-
-        const os_abi: e.OSABI = @enumFromInt(self.e_ident[e.EI_OSABI]);
-        assert(os_abi == self.parsed_header.os_abi);
-
-        const abi_version = self.e_ident[e.EI_ABIVERSION];
-        assert(abi_version == self.parsed_header.abi_version);
-
-        // EI_PAD should be all zero
-        assert(std.mem.eql(u8, self.e_ident[9..], &[_]u8{0} ** 7));
-
-        // TODO: swap bytes of all fields including e_ident if native endian does not match
-        const native_endian = @import("builtin").target.cpu.arch.endian();
-        if (endian != native_endian) return error.InvalidElfEndian;
-
-        const e_flags = 0; // no EF_ flags supported
-
-        return e.Ehdr{
-            .e_ident = self.e_ident,
-            .e_type = self.parsed_header.type,
-            .e_machine = self.parsed_header.machine,
-            .e_version = e_version,
-            .e_entry = self.parsed_header.entry,
-            .e_phoff = self.parsed_header.phoff,
-            .e_shoff = self.parsed_header.shoff,
-            .e_flags = e_flags,
-            .e_ehsize = @sizeOf(e.Ehdr),
-            .e_phentsize = self.parsed_header.phentsize,
-            .e_phnum = self.parsed_header.phnum,
-            .e_shentsize = self.parsed_header.shentsize,
-            .e_shnum = self.parsed_header.shnum,
-            .e_shstrndx = self.parsed_header.shstrndx,
-        };
-    }
-};
-
-test "Strip ELF" {
+test "Strip ELF no operation" {
     const allocator = std.testing.allocator;
 
     // Current objcopy limitations:
@@ -1786,7 +1787,7 @@ test "Strip ELF" {
 
     const elf_header = ElfHeader{
         .e_ident = e_ident.*,
-        .parsed_header = .{
+        .parsed = .{
             .is_64 = true,
             .endian = .little,
             .os_abi = std.elf.OSABI.GNU,
@@ -1804,13 +1805,14 @@ test "Strip ELF" {
         },
     };
 
-    var in_buffer = [_]u8{0} ** 128;
+    const test_buffer_size = 128;
+    var in_buffer = [_]u8{0} ** test_buffer_size;
     var in_buffer_stream = std.io.FixedBufferStream([]u8){ .buffer = &in_buffer, .pos = 0 };
 
-    var out_buffer = [_]u8{0} ** 128;
+    var out_buffer = [_]u8{0} ** test_buffer_size;
     var out_buffer_stream = std.io.FixedBufferStream([]u8){ .buffer = &out_buffer, .pos = 0 };
 
-    // input ELF
+    // write input ELF
     {
         const in_buffer_writer = in_buffer_stream.writer();
         try in_buffer_writer.writeStruct(try elf_header.toEhdr());
@@ -1820,7 +1822,7 @@ test "Strip ELF" {
     }
 
     try in_buffer_stream.seekTo(0);
-    try stripElf(allocator, &in_buffer_stream, &out_buffer_stream, elf_header.parsed_header, .{
+    try stripElf(allocator, &in_buffer_stream, &out_buffer_stream, elf_header, .{
         .strip_debug = false,
         .strip_all = false,
         .only_keep_debug = false,
@@ -1831,4 +1833,6 @@ test "Strip ELF" {
         .set_section_alignment = null,
         .set_section_flags = null,
     });
+
+    try std.testing.expectEqualSlices(u8, &in_buffer, &out_buffer);
 }
