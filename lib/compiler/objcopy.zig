@@ -1172,7 +1172,7 @@ fn ElfFile(comptime is_64: bool) type {
                         dest.sh_size = @intCast(data.len);
 
                     const addralign = if (src.sh_addralign == 0 or dest.sh_type == elf.SHT_NOBITS) 1 else src.sh_addralign;
-                    dest.sh_offset = std.mem.alignForward(Elf_OffSize, eof_offset, addralign);
+                    dest.sh_offset = std.mem.alignForward(Elf_OffSize, dest.sh_offset, addralign);
                     if (src.sh_offset != dest.sh_offset and section.segment != null and update.action != .empty and dest.sh_type != elf.SHT_NOTE and dest.sh_type != elf.SHT_NOBITS) {
                         if (src.sh_offset > dest.sh_offset) {
                             dest.sh_offset = src.sh_offset; // add padding to avoid modifing the program segments
@@ -1218,15 +1218,15 @@ fn ElfFile(comptime is_64: bool) type {
 
                             assert(dest_data.len == dest.sh_size);
                             cmdbuf.appendAssumeCapacity(.{ .write_data = .{ .data = dest_data, .out_offset = dest.sh_offset } });
-                            eof_offset = dest.sh_offset + dest.sh_size;
+                            eof_offset = @max(eof_offset, dest.sh_offset + dest.sh_size);
                         } else {
                             // direct contents copy
                             cmdbuf.appendAssumeCapacity(.{ .copy_range = .{ .in_offset = src.sh_offset, .len = dest.sh_size, .out_offset = dest.sh_offset } });
-                            eof_offset = dest.sh_offset + dest.sh_size;
+                            eof_offset = @max(eof_offset, dest.sh_offset + dest.sh_size);
                         }
                     } else {
                         // account for alignment padding even in empty sections to keep logical section order
-                        eof_offset = dest.sh_offset;
+                        eof_offset = @max(eof_offset, dest.sh_offset);
                     }
                 }
 
@@ -1508,16 +1508,39 @@ const ElfFileHelper = struct {
         comptime assert(std.meta.hasMethod(@TypeOf(out_file), "seekableStream"));
         comptime assert(std.meta.hasMethod(@TypeOf(out_file), "writer"));
 
+        // sort commands by section offset
+        const sorted_commands = try allocator.alloc(WriteCmd, cmds.len);
+        defer allocator.free(sorted_commands);
+        @memcpy(sorted_commands, cmds);
+
+        const SortCommands = struct {
+            pub fn lessThanFn(context: *@This(), lhs: WriteCmd, rhs: WriteCmd) bool {
+                _ = context;
+                const left_offset = offset(lhs);
+                const right_offset = offset(rhs);
+                return left_offset < right_offset;
+            }
+
+            fn offset(command: WriteCmd) usize {
+                return switch (command) {
+                    .copy_range => |cmd| cmd.out_offset,
+                    .write_data => |cmd| cmd.out_offset,
+                };
+            }
+        };
+        var sort = SortCommands{};
+        std.sort.block(WriteCmd, sorted_commands, &sort, SortCommands.lessThanFn);
+
         // consolidate holes between writes:
         //   by coping original padding data from in_file (by fusing contiguous ranges)
         //   by writing zeroes otherwise
         const zeroes = [1]u8{0} ** 4096;
         var consolidated = std.ArrayList(WriteCmd).init(allocator);
         defer consolidated.deinit();
-        try consolidated.ensureUnusedCapacity(cmds.len * 2);
+        try consolidated.ensureUnusedCapacity(sorted_commands.len * 2);
         var offset: u64 = 0;
         var fused_cmd: ?WriteCmd = null;
-        for (cmds) |cmd| {
+        for (sorted_commands) |cmd| {
             switch (cmd) {
                 .write_data => |data| {
                     assert(data.out_offset >= offset);
@@ -1766,10 +1789,6 @@ test "Split option" {
 test "Strip ELF no operation" {
     const allocator = std.testing.allocator;
 
-    // Current objcopy limitations:
-    // * program header table must be placed right after the ELF header (e_phoff = @sizeOf(Ehdr))
-    // * all sections must be ordered by their asending file offset (sh_offset)
-    // * target endianness must be the native endianness
     const program_header_table_offset = @sizeOf(std.elf.Ehdr);
     const program_header_count = 0;
     const section_header_table_offset = program_header_table_offset + program_header_count * @sizeOf(std.elf.Phdr);
@@ -1798,7 +1817,7 @@ test "Strip ELF no operation" {
         },
     };
 
-    const test_buffer_size = 128;
+    const test_buffer_size = 256;
     var in_buffer = [_]u8{0} ** test_buffer_size;
     var in_buffer_stream = std.io.FixedBufferStream([]u8){ .buffer = &in_buffer, .pos = 0 };
 
@@ -1809,9 +1828,6 @@ test "Strip ELF no operation" {
     {
         const in_buffer_writer = in_buffer_stream.writer();
         try in_buffer_writer.writeStruct(try elf_header.toEhdr());
-
-        const null_section_header = [_]u8{0} ** @sizeOf(std.elf.Shdr);
-        try in_buffer_writer.writeAll(&null_section_header);
     }
 
     try in_buffer_stream.seekTo(0);
@@ -1865,10 +1881,10 @@ test "Strip ELF unordered sections" {
     };
 
     const test_buffer_size = 512;
-    var in_buffer = [_]u8{0} ** test_buffer_size;
+    var in_buffer align(8) = [_]u8{0} ** test_buffer_size;
     var in_buffer_stream = std.io.FixedBufferStream([]u8){ .buffer = &in_buffer, .pos = 0 };
 
-    var out_buffer = [_]u8{0} ** test_buffer_size;
+    var out_buffer align(8) = [_]u8{0} ** test_buffer_size;
     var out_buffer_stream = std.io.FixedBufferStream([]u8){ .buffer = &out_buffer, .pos = 0 };
 
     // write input ELF
@@ -1962,4 +1978,24 @@ test "Strip ELF unordered sections" {
     });
 
     try std.testing.expectEqualSlices(u8, &in_buffer, &out_buffer);
+
+    {
+        const header = try std.elf.Header.parse(out_buffer[0..64]);
+        try std.testing.expectEqual(section_name_string_table_index, header.shstrndx);
+        try std.testing.expectEqual(section_header_count, header.shnum);
+
+        var section_header_it = header.section_header_iterator(out_buffer_stream);
+        const null_header = try section_header_it.next();
+        try std.testing.expect(null_header != null);
+        try std.testing.expectEqualSlices(u8, &[_]u8{0} ** @sizeOf(std.elf.Shdr), &@as([@sizeOf(std.elf.Shdr)]u8, @bitCast(null_header.?)));
+
+        const strtab_header = try section_header_it.next();
+        try std.testing.expect(strtab_header != null);
+        try std.testing.expectEqual(std.elf.SHT_STRTAB, strtab_header.?.sh_type);
+
+        // two test sections
+        try std.testing.expect(try section_header_it.next() != null);
+        try std.testing.expect(try section_header_it.next() != null);
+        try std.testing.expectEqual(null, try section_header_it.next());
+    }
 }
