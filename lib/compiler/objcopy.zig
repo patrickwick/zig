@@ -144,6 +144,7 @@ fn cmdObjCopy(
     }
     const input = opt_input orelse fatal("expected input parameter", .{});
     const output = opt_output orelse fatal("expected output parameter", .{});
+    if (std.mem.eql(u8, input, output)) fatal("input and output file paths must be different", .{});
 
     var in_file = fs.cwd().openFile(input, .{}) catch |err|
         fatal("unable to open '{s}': {s}", .{ input, @errorName(err) });
@@ -950,7 +951,7 @@ fn ElfFile(comptime is_64: bool) type {
                     elf.SHT_DYNSYM => .exe,
                     elf.SHT_PROGBITS => cat: {
                         if (std.mem.eql(u8, section.name, ".comment")) break :cat .exe;
-                        if (std.mem.eql(u8, section.name, ".gnu_debuglink")) break :cat .none;
+                        if (std.mem.eql(u8, section.name, ".gnu_debuglink")) break :cat .debug;
                         break :cat category_from_program;
                     },
                     elf.SHT_LOPROC...elf.SHT_HIPROC => .common, // don't strip unknown sections
