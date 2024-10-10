@@ -134,7 +134,12 @@ fn cmdObjCopy(
             if (i >= args.len) fatal("expected section name and filename arguments after '{s}'", .{arg});
 
             if (splitOption(args[i])) |split| {
-                add_section = .{ .section_name = split.first, .file_path = split.second };
+                var section_file = fs.cwd().openFile(split.second, .{}) catch |err|
+                    fatal("unable to open '{s}': {s}", .{ split.second, @errorName(err) });
+                defer section_file.close();
+
+                const content = try section_file.readToEndAlloc(arena.allocator(), std.math.maxInt(usize));
+                add_section = .{ .section_name = split.first, .content = content };
             } else {
                 fatal("unrecognized argument: '{s}', expecting <name>=<file>", .{args[i]});
             }
@@ -145,6 +150,8 @@ fn cmdObjCopy(
     const input = opt_input orelse fatal("expected input parameter", .{});
     const output = opt_output orelse fatal("expected output parameter", .{});
     if (std.mem.eql(u8, input, output)) fatal("input and output file paths must be different", .{});
+
+    defer if (add_section) |add| arena.allocator().free(add.content) catch {};
 
     var in_file = fs.cwd().openFile(input, .{}) catch |err|
         fatal("unable to open '{s}': {s}", .{ input, @errorName(err) });
@@ -296,7 +303,7 @@ pub const EmitRawElfOptions = struct {
 
 const AddSection = struct {
     section_name: []const u8,
-    file_path: []const u8,
+    content: []const u8,
 };
 
 const SetSectionAlignment = struct {
@@ -749,9 +756,9 @@ const StripElfOptions = struct {
     strip_debug: bool = false,
     only_keep_debug: bool = false,
     compress_debug: bool = false,
-    add_section: ?AddSection,
-    set_section_alignment: ?SetSectionAlignment,
-    set_section_flags: ?SetSectionFlags,
+    add_section: ?AddSection = null,
+    set_section_alignment: ?SetSectionAlignment = null,
+    set_section_flags: ?SetSectionFlags = null,
 };
 
 fn stripElf(
@@ -1122,6 +1129,7 @@ fn ElfFile(comptime is_64: bool) type {
             var cmdbuf = std.ArrayList(ElfFileHelper.WriteCmd).init(allocator);
             defer cmdbuf.deinit();
             try cmdbuf.ensureUnusedCapacity(3 + new_shnum);
+            // FIXME: string table increase is not considered at all => adding a section increases the size, so the offset must change
             var eof_offset: Elf_OffSize = 0; // track the end of the data written so far.
 
             // build the updated headers
@@ -1150,7 +1158,7 @@ fn ElfFile(comptime is_64: bool) type {
             // update sections and queue payload writes
             const updated_section_header = blk: {
                 const dest_sections = try allocator.alloc(Elf_Shdr, new_shnum);
-                dest_sections[0] = self.sections[0].section;
+                dest_sections[0] = self.sections[0].section; // null section header
 
                 var dest_section_idx: u32 = 1;
                 for (self.sections[1..], sections_update[1..]) |section, update| {
@@ -1262,19 +1270,13 @@ fn ElfFile(comptime is_64: bool) type {
 
                 // --add-section
                 if (options.add_section) |add_section| {
-                    var section_file = fs.cwd().openFile(add_section.file_path, .{}) catch |err|
-                        fatal("unable to open '{s}': {s}", .{ add_section.file_path, @errorName(err) });
-                    defer section_file.close();
-
-                    const payload = try section_file.readToEndAlloc(arena.allocator(), std.math.maxInt(usize));
-
                     dest_sections[dest_section_idx] = Elf_Shdr{
                         .sh_name = user_section_name,
                         .sh_type = elf.SHT_PROGBITS,
                         .sh_flags = 0,
                         .sh_addr = 0,
                         .sh_offset = eof_offset,
-                        .sh_size = @intCast(payload.len),
+                        .sh_size = @intCast(add_section.content.len),
                         .sh_link = elf.SHN_UNDEF,
                         .sh_info = elf.SHN_UNDEF,
                         .sh_addralign = 4,
@@ -1282,8 +1284,8 @@ fn ElfFile(comptime is_64: bool) type {
                     };
                     dest_section_idx += 1;
 
-                    cmdbuf.appendAssumeCapacity(.{ .write_data = .{ .data = payload, .out_offset = eof_offset } });
-                    eof_offset += @as(Elf_OffSize, @intCast(payload.len));
+                    cmdbuf.appendAssumeCapacity(.{ .write_data = .{ .data = add_section.content, .out_offset = eof_offset } });
+                    eof_offset += @as(Elf_OffSize, @intCast(add_section.content.len));
                 }
 
                 assert(dest_section_idx == new_shnum);
@@ -1832,17 +1834,7 @@ test "Strip ELF no operation" {
     }
 
     try in_buffer_stream.seekTo(0);
-    try stripElf(allocator, &in_buffer_stream, &out_buffer_stream, &elf_header, .{
-        .strip_debug = false,
-        .strip_all = false,
-        .only_keep_debug = false,
-        .add_debuglink = null,
-        .extract_to = null,
-        .compress_debug = false,
-        .add_section = null,
-        .set_section_alignment = null,
-        .set_section_flags = null,
-    });
+    try stripElf(allocator, &in_buffer_stream, &out_buffer_stream, &elf_header, .{});
 
     try std.testing.expectEqualSlices(u8, &in_buffer, &out_buffer);
 }
@@ -1966,6 +1958,133 @@ test "Strip ELF unordered sections" {
     }
 
     try in_buffer_stream.seekTo(0);
+    try stripElf(allocator, &in_buffer_stream, &out_buffer_stream, &elf_header, .{});
+
+    try std.testing.expectEqualSlices(u8, &in_buffer, &out_buffer);
+
+    {
+        const header = try std.elf.Header.parse(out_buffer[0..64]);
+        try std.testing.expectEqual(section_name_string_table_index, header.shstrndx);
+        try std.testing.expectEqual(section_header_count, header.shnum);
+
+        var section_header_it = header.section_header_iterator(out_buffer_stream);
+        const null_header = try section_header_it.next();
+        try std.testing.expect(null_header != null);
+        try std.testing.expectEqualSlices(u8, &[_]u8{0} ** @sizeOf(std.elf.Shdr), &@as([@sizeOf(std.elf.Shdr)]u8, @bitCast(null_header.?)));
+
+        const strtab_header = try section_header_it.next();
+        try std.testing.expect(strtab_header != null);
+        try std.testing.expectEqual(std.elf.SHT_STRTAB, strtab_header.?.sh_type);
+
+        // two test sections
+        try std.testing.expect(try section_header_it.next() != null);
+        try std.testing.expect(try section_header_it.next() != null);
+        try std.testing.expectEqual(null, try section_header_it.next());
+    }
+}
+
+test "Strip ELF add section" {
+    const allocator = std.testing.allocator;
+
+    // test ELF file order: ELF header, program header table, section contents, section header table
+    const program_header_table_offset = @sizeOf(std.elf.Ehdr);
+    const program_header_count = 0;
+    const section_header_table_offset = 80;
+    const section_header_count = 3; // null + string table + test sections
+    const section_name_string_table_index = 1;
+    const section_alignment = 8;
+
+    const e_ident = std.elf.MAGIC ++ [_]u8{std.elf.ELFCLASS64} ++ [_]u8{std.elf.ELFDATA2LSB} ++ [_]u8{std.elf.EV_CURRENT} ++ [_]u8{@intFromEnum(std.elf.OSABI.GNU)} ++ [_]u8{0} ++ [_]u8{0} ** 7;
+
+    const elf_header = ElfHeader{
+        .e_ident = e_ident.*,
+        .parsed = .{
+            .is_64 = true,
+            .endian = .little,
+            .os_abi = std.elf.OSABI.GNU,
+            .abi_version = 0,
+            .type = std.elf.ET.EXEC,
+            .machine = .X86_64,
+            .entry = 0,
+            .phoff = program_header_table_offset,
+            .shoff = section_header_table_offset,
+            .phentsize = @sizeOf(std.elf.Elf64_Phdr),
+            .phnum = program_header_count,
+            .shentsize = @sizeOf(std.elf.Elf64_Shdr),
+            .shnum = section_header_count,
+            .shstrndx = section_name_string_table_index,
+        },
+    };
+
+    const test_buffer_size = 512;
+    var in_buffer align(8) = [_]u8{0} ** test_buffer_size;
+    var in_buffer_stream = std.io.FixedBufferStream([]u8){ .buffer = &in_buffer, .pos = 0 };
+
+    var out_buffer align(8) = [_]u8{0} ** test_buffer_size;
+    var out_buffer_stream = std.io.FixedBufferStream([]u8){ .buffer = &out_buffer, .pos = 0 };
+
+    // write input ELF
+    {
+        const in_buffer_writer = in_buffer_stream.writer();
+        try in_buffer_writer.writeStruct(try elf_header.toEhdr());
+
+        // no program headers
+
+        // section contents before section headers since the offsets are simpler to compute then
+        const section_name_0 = ".abc";
+
+        // FIXME: string table section must be added at the end because the current code does not consider it in the offset calculation at all
+        // => offset calculation does not consider its size at all, so adding more strings will overwrite data
+        const string_table_section_offset = try in_buffer_stream.getPos();
+        // NOTE: has to start with a 0
+        try in_buffer_writer.writeByte(0);
+        try in_buffer_writer.writeAll(section_name_0);
+        try in_buffer_writer.writeByte(0);
+
+        try in_buffer_stream.seekTo(std.mem.alignForward(usize, try in_buffer_stream.getPos(), section_alignment));
+        const section_content_size = 8;
+        const section_content_offset_0 = try in_buffer_stream.getPos();
+        try in_buffer_writer.writeAll(&[_]u8{ 0, 1, 2, 3, 4, 5, 6, 7 });
+
+        // section headers
+        const not_mapped = 0;
+        const dynamic_size = 0;
+
+        try std.testing.expectEqual(section_header_table_offset, try in_buffer_stream.getPos());
+        try in_buffer_stream.seekTo(std.mem.alignForward(usize, try in_buffer_stream.getPos(), section_alignment));
+        const null_section_header = [_]u8{0} ** @sizeOf(std.elf.Shdr);
+        try in_buffer_writer.writeAll(&null_section_header);
+
+        // string section
+        try in_buffer_writer.writeStruct(std.elf.Shdr{
+            .sh_name = 1,
+            .sh_type = std.elf.SHT_STRTAB,
+            .sh_flags = std.elf.SHF_STRINGS,
+            .sh_addr = not_mapped,
+            .sh_offset = string_table_section_offset,
+            .sh_size = 1 + section_name_0.len + 1 + 1, // starts and ends with 0
+            .sh_link = 0,
+            .sh_info = 0,
+            .sh_addralign = 1,
+            .sh_entsize = dynamic_size,
+        });
+
+        // write two sections that are not ordered with ascending file offsets
+        try in_buffer_writer.writeStruct(std.elf.Shdr{
+            .sh_name = 1,
+            .sh_type = std.elf.SHT_PROGBITS,
+            .sh_flags = 0,
+            .sh_addr = not_mapped,
+            .sh_offset = section_content_offset_0,
+            .sh_size = section_content_size,
+            .sh_link = 0,
+            .sh_info = 0,
+            .sh_addralign = 8,
+            .sh_entsize = dynamic_size,
+        });
+    }
+
+    try in_buffer_stream.seekTo(0);
     try stripElf(allocator, &in_buffer_stream, &out_buffer_stream, &elf_header, .{
         .strip_debug = false,
         .strip_all = false,
@@ -1973,7 +2092,10 @@ test "Strip ELF unordered sections" {
         .add_debuglink = null,
         .extract_to = null,
         .compress_debug = false,
-        .add_section = null,
+        .add_section = AddSection{
+            .section_name = ".def",
+            .content = &[_]u8{ 60, 61, 62, 63, 64, 65, 66, 67, 68, 69 },
+        },
         .set_section_alignment = null,
         .set_section_flags = null,
     });
@@ -1994,8 +2116,9 @@ test "Strip ELF unordered sections" {
         try std.testing.expect(strtab_header != null);
         try std.testing.expectEqual(std.elf.SHT_STRTAB, strtab_header.?.sh_type);
 
-        // two test sections
+        // test section
         try std.testing.expect(try section_header_it.next() != null);
+        // added section
         try std.testing.expect(try section_header_it.next() != null);
         try std.testing.expectEqual(null, try section_header_it.next());
     }
