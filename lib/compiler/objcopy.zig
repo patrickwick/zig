@@ -879,7 +879,6 @@ const ElfToElfDescriptor = struct {
 
 // Creates description of the output ELF file to be created.
 // The section name string table and all offsets are rebuilt after all operations are applied and offsets are adjusted.
-// TODO: rename
 fn prepareElfToElf(allocator: Allocator, input: anytype, options: StripElfOptions) !ElfToElfDescriptor {
     comptime assert(std.meta.hasMethod(@TypeOf(input), "seekableStream"));
     comptime assert(std.meta.hasMethod(@TypeOf(input), "reader"));
@@ -918,20 +917,18 @@ fn prepareElfToElf(allocator: Allocator, input: anytype, options: StripElfOption
     defer allocator.free(string_table_content);
 
     var sections = try std.ArrayList(Section).initCapacity(allocator, header.shnum);
-    var section_it = header.section_header_iterator(input);
-    while (try section_it.next()) |section| {
-        if (section.sh_name >= string_table_content.len) fatal("invalid ELF input file: section name offset {d} exceeds strtab size {d}", .{ section.sh_name, string_table_content.len });
+    {
+        var section_it = header.section_header_iterator(input);
+        while (try section_it.next()) |section| {
+            if (section.sh_name >= string_table_content.len) fatal("invalid ELF input file: section name offset {d} exceeds strtab size {d}", .{ section.sh_name, string_table_content.len });
 
-        // copy names and rebuild strtab later for simplicity (no resizing and keeping track of offsets for following sections)
-        const name = std.mem.span(@as([*:0]const u8, @ptrCast(&string_table_content[section.sh_name])));
-        const name_copy = try allocator.alloc(u8, name.len);
-        @memcpy(name_copy, name);
-
-        try sections.append(.{
-            .name = name_copy,
-            .shdr = section,
-            .content = .input_file_offset,
-        });
+            const name = std.mem.span(@as([*:0]const u8, @ptrCast(&string_table_content[section.sh_name])));
+            try sections.append(.{
+                .name = name,
+                .shdr = section,
+                .content = .input_file_offset,
+            });
+        }
     }
 
     var program_segments = try std.ArrayList(ProgramSegment).initCapacity(allocator, header.phnum);
@@ -977,7 +974,7 @@ fn prepareElfToElf(allocator: Allocator, input: anytype, options: StripElfOption
                 section.shdr.sh_addralign = alignment.alignment;
                 break;
             }
-        }
+        } else fatal("Section '{s}' to change alignment on does not exist", .{alignment.section_name});
     }
 
     if (options.set_section_flags) |set_flags| {
@@ -1021,10 +1018,37 @@ fn prepareElfToElf(allocator: Allocator, input: anytype, options: StripElfOption
                 if (f.strings) shdr.sh_flags |= std.elf.SHF_STRINGS;
                 break;
             }
-        }
+        } else fatal("Section '{s}' to change flags on does not exist", .{set_flags.section_name});
     }
 
-    // TODO: rebuild string table section and update all sh_name offsets
+    // rebuild string table section and update all sh_name offsets
+    {
+        var strtab_size: usize = 1; // always starts with a 0
+        for (sections.items) |section| {
+            if (section.shdr.sh_type == std.elf.SHT_STRTAB) continue;
+            strtab_size += section.name.len + 1; // + 1 for sentinel
+        }
+
+        const strtab_content = try allocator.alloc(u8, strtab_size);
+        @memset(strtab_content, 0);
+        strtab_content[0] = 0;
+        var offset: usize = 1;
+        for (sections.items) |*section| {
+            if (section.shdr.sh_type == std.elf.SHT_STRTAB) continue;
+            defer offset += section.name.len + 1;
+            @memcpy(strtab_content[offset .. offset + section.name.len], section.name);
+            strtab_content[offset + section.name.len] = 0;
+            section.shdr.sh_name = @intCast(offset);
+        }
+
+        for (sections.items) |*strtab| {
+            if (strtab.shdr.sh_type == std.elf.SHT_STRTAB) {
+                strtab.content = .{ .data = strtab_content };
+                strtab.content = .{ .data = strtab_content };
+                break;
+            }
+        } else fatal("input ELF file does not contain a string table section (strtab)", .{});
+    }
 
     // TODO: recompute section offsets with correct alignment
 
