@@ -119,7 +119,7 @@ fn cmdObjCopy(
                 .set_section_alignment = options.set_section_alignment,
                 .set_section_flags = options.set_section_flags,
             });
-            // TODO: defer deinit all heap memory
+            defer out_descriptor.deinit();
 
             const processed_descriptor = try processElfDescriptor(arena, out_descriptor);
 
@@ -901,10 +901,21 @@ const ElfDescriptor = struct {
     elf_header: ElfHeader,
     sections: std.ArrayList(Section),
     program_segments: std.ArrayList(ProgramSegment),
+    // heap allocated section name table copy that section names hold slices to
+    string_table_content: []const u8,
+    string_table_content_allocator: Allocator,
+
+    // TODO: clarify what data is kept across the stages and when it is freed
+    // also add init function with capacities?
+    fn deinit(self: *const @This()) void {
+        self.sections.deinit();
+        self.program_segments.deinit();
+        self.string_table_content_allocator.free(self.string_table_content);
+    }
 };
 
 inline fn isStringTable(shdr: std.elf.Shdr) bool {
-    return shdr.sh_type == std.elf.SHT_STRTAB and (shdr.sh_flags & std.elf.SHF_STRINGS) != 0;
+    return shdr.sh_type == std.elf.SHT_STRTAB;
 }
 
 inline fn isSectionInFile(shdr: std.elf.Shdr) bool {
@@ -938,7 +949,11 @@ fn createElfDescriptor(allocator: Allocator, input: anytype, options: StripElfOp
         var i: usize = 0;
         while (try section_it.next()) |section| : (i += 1) {
             if (i == header.shstrndx) {
-                assert(isStringTable(section));
+                if (!isStringTable(section)) fatal(
+                    "zig objcopy: section type of section name string table must be SHT_STRTAB 0x{x}, got 0x{x}",
+                    .{ std.elf.SHT_STRTAB, section.sh_type },
+                );
+
                 break :strtab Section{
                     .name = ".strtab",
                     .shdr = section,
@@ -949,7 +964,6 @@ fn createElfDescriptor(allocator: Allocator, input: anytype, options: StripElfOp
         fatal("input ELF file does not contain a string table section (strtab)", .{});
     };
     const string_table_content = try string_table_section.readContentAlloc(input, allocator);
-    defer allocator.free(string_table_content);
 
     var sections = try std.ArrayList(Section).initCapacity(allocator, header.shnum);
     {
@@ -1071,6 +1085,8 @@ fn createElfDescriptor(allocator: Allocator, input: anytype, options: StripElfOp
         .elf_header = .{ .e_ident = e_ident, .parsed = header },
         .sections = sections,
         .program_segments = program_segments,
+        .string_table_content = string_table_content,
+        .string_table_content_allocator = allocator,
     };
 }
 
@@ -1194,7 +1210,10 @@ fn writeElf(allocator: Allocator, desc: ProcessedElfDescriptor, in_file: anytype
     }
 
     for (sections.items) |section| {
-        // TODO: align writer and fill gaps with 0
+        // TODO: fill gaps with 0
+        const alignment = section.shdr.sh_addralign;
+        try out_stream.seekTo(std.mem.alignForward(usize, try out_stream.getPos(), alignment));
+
         switch (section.content) {
             .data => |data| {
                 try out_stream.seekTo(section.shdr.sh_offset);
@@ -1431,52 +1450,90 @@ test parseCommandLine {
     }
 }
 
-// test "Strip ELF no operation" {
-//     const allocator = t.allocator;
-//
-//     const program_header_table_offset = @sizeOf(std.elf.Ehdr);
-//     const program_header_count = 0;
-//     const section_header_table_offset = program_header_table_offset + program_header_count * @sizeOf(std.elf.Phdr);
-//     const section_header_count = 1; // null section
-//     const section_name_string_table_index = 0; // no strtab
-//
-//     const e_ident = std.elf.MAGIC ++ [_]u8{std.elf.ELFCLASS64} ++ [_]u8{std.elf.ELFDATA2LSB} ++ [_]u8{std.elf.EV_CURRENT} ++ [_]u8{@intFromEnum(std.elf.OSABI.GNU)} ++ [_]u8{0} ++ [_]u8{0} ** 7;
-//
-//     const elf_header = ElfHeader{
-//         .e_ident = e_ident.*,
-//         .parsed = .{
-//             .is_64 = true,
-//             .endian = .little,
-//             .os_abi = std.elf.OSABI.GNU,
-//             .abi_version = 0,
-//             .type = std.elf.ET.EXEC,
-//             .machine = .X86_64,
-//             .entry = 0,
-//             .phoff = program_header_table_offset,
-//             .shoff = section_header_table_offset,
-//             .phentsize = @sizeOf(std.elf.Elf64_Phdr),
-//             .phnum = program_header_count,
-//             .shentsize = @sizeOf(std.elf.Elf64_Shdr),
-//             .shnum = section_header_count,
-//             .shstrndx = section_name_string_table_index,
-//         },
-//     };
-//
-//     const test_buffer_size = 256;
-//     var in_buffer = [_]u8{0} ** test_buffer_size;
-//     var in_buffer_stream = std.io.FixedBufferStream([]u8){ .buffer = &in_buffer, .pos = 0 };
-//
-//     var out_buffer = [_]u8{0} ** test_buffer_size;
-//     var out_buffer_stream = std.io.FixedBufferStream([]u8){ .buffer = &out_buffer, .pos = 0 };
-//
-//     // write input ELF
-//     {
-//         const in_buffer_writer = in_buffer_stream.writer();
-//         try in_buffer_writer.writeStruct(try elf_header.toEhdr());
-//     }
-//
-//     try in_buffer_stream.seekTo(0);
-//     try prepareElfToElf(allocator, &in_buffer_stream, &out_buffer_stream, &elf_header, .{});
-//
-//     try t.expectEqualSlices(u8, &in_buffer, &out_buffer);
-// }
+// Test objcopy without any options on a minimal ELF file with a null section and section name table section.
+test "Strip ELF no operation" {
+    const allocator = t.allocator;
+
+    const program_header_table_offset = @sizeOf(std.elf.Ehdr);
+    const program_header_count = 0;
+    const section_header_table_offset = 80;
+    const section_header_count = 2; // null section + strtab
+    const section_name_string_table_index = 1;
+    const section_alignment = 8;
+    const section_not_mapped = 0;
+    const section_dynamic_size = 0;
+
+    const e_ident = std.elf.MAGIC ++ [_]u8{std.elf.ELFCLASS64} ++ [_]u8{std.elf.ELFDATA2LSB} ++ [_]u8{std.elf.EV_CURRENT} ++ [_]u8{@intFromEnum(std.elf.OSABI.GNU)} ++ [_]u8{0} ++ [_]u8{0} ** 7;
+
+    const elf_header = ElfHeader{
+        .e_ident = e_ident.*,
+        .parsed = .{
+            .is_64 = true,
+            .endian = .little,
+            .os_abi = std.elf.OSABI.GNU,
+            .abi_version = 0,
+            .type = std.elf.ET.EXEC,
+            .machine = .X86_64,
+            .entry = 0,
+            .phoff = program_header_table_offset,
+            .shoff = section_header_table_offset,
+            .phentsize = @sizeOf(std.elf.Elf64_Phdr),
+            .phnum = program_header_count,
+            .shentsize = @sizeOf(std.elf.Elf64_Shdr),
+            .shnum = section_header_count,
+            .shstrndx = section_name_string_table_index,
+        },
+    };
+
+    const test_buffer_size = 256;
+    var in_buffer = [_]u8{0} ** test_buffer_size;
+    var in_buffer_stream = std.io.FixedBufferStream([]u8){ .buffer = &in_buffer, .pos = 0 };
+
+    // write input ELF
+    {
+        // header
+        const in_buffer_writer = in_buffer_stream.writer();
+        try in_buffer_writer.writeStruct(try elf_header.toEhdr());
+
+        // section name string table before section headers for simple offsets
+        const string_table_section_offset = try in_buffer_stream.getPos();
+        try in_buffer_writer.writeByte(0); // 0 for null section without a name
+        try in_buffer_writer.writeAll(".shstrtab");
+        try in_buffer_writer.writeByte(0);
+        const string_table_section_end = try in_buffer_stream.getPos();
+
+        // section headers
+        try in_buffer_stream.seekTo(std.mem.alignForward(usize, try in_buffer_stream.getPos(), section_alignment));
+        try std.testing.expectEqual(section_header_table_offset, try in_buffer_stream.getPos());
+
+        const null_section_header = [_]u8{0} ** @sizeOf(std.elf.Shdr);
+        try in_buffer_writer.writeAll(&null_section_header);
+
+        // string section
+        try in_buffer_writer.writeStruct(std.elf.Shdr{
+            .sh_name = 1,
+            .sh_type = std.elf.SHT_STRTAB,
+            .sh_flags = std.elf.SHF_STRINGS,
+            .sh_addr = section_not_mapped,
+            .sh_offset = string_table_section_offset,
+            .sh_size = string_table_section_end - string_table_section_offset,
+            .sh_link = 0,
+            .sh_info = 0,
+            .sh_addralign = 1,
+            .sh_entsize = section_dynamic_size,
+        });
+    }
+
+    const out_descriptor = try createElfDescriptor(allocator, &in_buffer_stream, .{});
+    defer out_descriptor.deinit();
+
+    try t.expectEqual(program_header_count, out_descriptor.program_segments.items.len);
+    try t.expectEqual(section_header_count, out_descriptor.sections.items.len);
+
+    // null section
+    try t.expectEqualStrings("", out_descriptor.sections.items[0].name); // empty string for null section
+    try t.expectEqual(std.mem.zeroes(std.elf.Shdr), out_descriptor.sections.items[0].shdr);
+
+    // shstrtab
+    try t.expectEqualStrings(".shstrtab", out_descriptor.sections.items[1].name);
+}
