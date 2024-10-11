@@ -120,7 +120,7 @@ fn cmdObjCopy(
                 .set_section_flags = options.set_section_flags,
             });
 
-            try writeElf(out_descriptor, out_file);
+            try writeElf(arena, out_descriptor, in_file, out_file);
 
             return std.process.cleanExit();
         },
@@ -819,22 +819,40 @@ const StripElfOptions = struct {
 };
 
 const Section = struct {
-    const Content = union(enum) {
-        input_file_offset: void, // unmodified input => use sh_offset and sh_size
-        data: []const u8, // new data
+    // copy from the input file
+    const InputFileRange = struct {
+        offset: usize,
+        size: usize,
+    };
+
+    // SHT_NOBITS section like .bss do not store content in the ELF file
+    const NoBits = struct {
+        offset: usize,
+        size: usize,
+    };
+
+    // new data written into new sections that did not exist in the input
+    const Data = []const u8;
+
+    // section contents have different sources
+    const ContentSource = union(enum) {
+        input_file_range: InputFileRange,
+        no_bits: NoBits,
+        data: Data,
     };
 
     // TODO: heap allocation could be avoided using a union type of a slice or the input file offset but probably not worth the effort
     name: []const u8, // head allocated copy
     shdr: std.elf.Shdr, // always in native endianess (converted while reading if necessary)
-    content: Content,
+    content: ContentSource,
 
     // Create the section header in the input file endianess
     fn toShdr(self: *const @This(), target_endianess: std.builtin.Endian) std.elf.Shdr {
-        _ = self;
         _ = target_endianess;
-        fatal("TODO: NYI");
-        return undefined;
+        std.log.warn("TODO: apply endianess on copy if native does not match target", .{});
+        // std.mem.byteSwapAllFields(comptime S: type, ptr: *S)
+        _ = target_endianess;
+        return self.shdr;
     }
 
     // User has to free read memory
@@ -843,15 +861,19 @@ const Section = struct {
         comptime assert(std.meta.hasMethod(@TypeOf(input), "reader"));
 
         switch (self.content) {
-            .input_file_offset => {
-                try input.seekableStream().seekTo(self.shdr.sh_offset);
-                const data = try allocator.alloc(u8, self.shdr.sh_size);
+            .input_file_range => |range| {
+                const data = try allocator.alloc(u8, range.size);
+                errdefer allocator.free(data);
+
+                try input.seekableStream().seekTo(range.offset);
                 const bytes_read = try input.reader().readAll(data);
                 if (bytes_read != data.len) return error.TruncatedElf;
+
                 return data;
             },
+            .no_bits => return "", // .bss, etc.
             .data => |data| {
-                const copy = try allocator.alloc(u8, self.shdr.sh_size);
+                const copy = try allocator.alloc(u8, data.len);
                 @memcpy(copy, data);
                 return copy;
             },
@@ -864,10 +886,10 @@ const ProgramSegment = struct {
 
     // Create the section header in the input file endianess
     pub fn toPhdr(self: *const @This(), target_endianess: std.builtin.Endian) std.elf.Phdr {
-        _ = self;
+        std.log.warn("TODO: apply endianess", .{});
+        // std.mem.byteSwapAllFields(comptime S: type, ptr: *S)
         _ = target_endianess;
-        fatal("TODO: NYI");
-        return undefined;
+        return self.phdr;
     }
 };
 
@@ -876,6 +898,14 @@ const ElfToElfDescriptor = struct {
     sections: std.ArrayList(Section),
     program_segments: std.ArrayList(ProgramSegment),
 };
+
+inline fn isStringTable(shdr: std.elf.Shdr) bool {
+    return shdr.sh_type == std.elf.SHT_STRTAB and (shdr.sh_flags & std.elf.SHF_STRINGS) != 0;
+}
+
+inline fn isSectionInFile(shdr: std.elf.Shdr) bool {
+    return shdr.sh_type != std.elf.SHT_NOBITS and (shdr.sh_flags & std.elf.SHF_ALLOC) != 0;
+}
 
 // Creates description of the output ELF file to be created.
 // The section name string table and all offsets are rebuilt after all operations are applied and offsets are adjusted.
@@ -898,18 +928,20 @@ fn prepareElfToElf(allocator: Allocator, input: anytype, options: StripElfOption
     const bytes_read = input.preadAll(&e_ident, 0) catch |err| fatal("unable to read input ELF file: {s}", .{@errorName(err)});
     if (bytes_read < elf.EI_NIDENT) fatal("input is not an ELF file", .{});
 
-    // find strtab
-    var string_table_section_index: usize = 0;
+    // read strtab
     const string_table_section = strtab: {
         // NOTE: iterator accounts for endianess, so it's always native
         var section_it = header.section_header_iterator(input);
-        while (try section_it.next()) |section| {
-            if (section.sh_type == std.elf.SHT_STRTAB) break :strtab Section{
-                .name = ".strtab",
-                .shdr = section,
-                .content = .input_file_offset,
-            };
-            string_table_section_index += 1;
+        var i: usize = 0;
+        while (try section_it.next()) |section| : (i += 1) {
+            if (i == header.shstrndx) {
+                assert(isStringTable(section));
+                break :strtab Section{
+                    .name = ".strtab",
+                    .shdr = section,
+                    .content = .{ .input_file_range = .{ .offset = section.sh_offset, .size = section.sh_size } },
+                };
+            }
         }
         fatal("input ELF file does not contain a string table section (strtab)", .{});
     };
@@ -920,13 +952,20 @@ fn prepareElfToElf(allocator: Allocator, input: anytype, options: StripElfOption
     {
         var section_it = header.section_header_iterator(input);
         while (try section_it.next()) |section| {
-            if (section.sh_name >= string_table_content.len) fatal("invalid ELF input file: section name offset {d} exceeds strtab size {d}", .{ section.sh_name, string_table_content.len });
+            if (section.sh_name >= string_table_content.len)
+                fatal("invalid ELF input file: section name offset {d} exceeds strtab size {d}", .{ section.sh_name, string_table_content.len });
 
             const name = std.mem.span(@as([*:0]const u8, @ptrCast(&string_table_content[section.sh_name])));
+
+            const content: Section.ContentSource = if (isSectionInFile(section))
+                .{ .input_file_range = .{ .offset = section.sh_offset, .size = section.sh_size } }
+            else
+                .{ .no_bits = .{ .offset = section.sh_offset, .size = section.sh_size } };
+
             try sections.append(.{
                 .name = name,
                 .shdr = section,
-                .content = .input_file_offset,
+                .content = content,
             });
         }
     }
@@ -1021,29 +1060,31 @@ fn prepareElfToElf(allocator: Allocator, input: anytype, options: StripElfOption
         } else fatal("Section '{s}' to change flags on does not exist", .{set_flags.section_name});
     }
 
+    // TODO: move rebuild strtab, recompute offsets and header update to output?
+    // => otherwise there are many preconditions for the descriptor that need to hold before writing
     // rebuild string table section and update all sh_name offsets
     {
-        var strtab_size: usize = 1; // always starts with a 0
+        var strtab_size: usize = 0;
         for (sections.items) |section| {
-            if (section.shdr.sh_type == std.elf.SHT_STRTAB) continue;
+            if (isStringTable(section.shdr)) continue;
             strtab_size += section.name.len + 1; // + 1 for sentinel
         }
 
         const strtab_content = try allocator.alloc(u8, strtab_size);
         @memset(strtab_content, 0);
-        strtab_content[0] = 0;
-        var offset: usize = 1;
+
+        var offset: usize = 0;
         for (sections.items) |*section| {
-            if (section.shdr.sh_type == std.elf.SHT_STRTAB) continue;
+            if (isStringTable(section.shdr)) continue;
             defer offset += section.name.len + 1;
             @memcpy(strtab_content[offset .. offset + section.name.len], section.name);
             strtab_content[offset + section.name.len] = 0;
             section.shdr.sh_name = @intCast(offset);
         }
+        assert(strtab_content[0] == 0); // expect 0 for null section with an empty name
 
         for (sections.items) |*strtab| {
             if (strtab.shdr.sh_type == std.elf.SHT_STRTAB) {
-                strtab.content = .{ .data = strtab_content };
                 strtab.content = .{ .data = strtab_content };
                 break;
             }
@@ -1051,8 +1092,11 @@ fn prepareElfToElf(allocator: Allocator, input: anytype, options: StripElfOption
     }
 
     // TODO: recompute section offsets with correct alignment
+    // {
+    //     var offset: usize = 0;
+    //     for (sections.items) |*section| {}
+    // }
 
-    // recompute offsets after all sections are ordered
     const program_header_offset = header.phoff; // TODO: compute
     const section_header_offset = header.shoff; // TODO: compute
 
@@ -1070,7 +1114,7 @@ fn prepareElfToElf(allocator: Allocator, input: anytype, options: StripElfOption
         .phnum = @intCast(program_segments.items.len),
         .shentsize = header.shentsize,
         .shnum = @intCast(sections.items.len),
-        .shstrndx = @intCast(string_table_section_index),
+        .shstrndx = header.shstrndx,
     };
 
     return .{
@@ -1080,20 +1124,68 @@ fn prepareElfToElf(allocator: Allocator, input: anytype, options: StripElfOption
     };
 }
 
-fn writeElf(result: ElfToElfDescriptor, out_file: anytype) !void {
+fn writeElf(allocator: Allocator, result: ElfToElfDescriptor, in_file: anytype, out_file: anytype) !void {
+    comptime assert(std.meta.hasMethod(@TypeOf(in_file), "seekableStream"));
+    comptime assert(std.meta.hasMethod(@TypeOf(in_file), "reader"));
     comptime assert(std.meta.hasMethod(@TypeOf(out_file), "seekableStream"));
     comptime assert(std.meta.hasMethod(@TypeOf(out_file), "writer"));
 
+    const reader = in_file.reader();
+    const in_stream = in_file.seekableStream();
     const writer = out_file.writer();
-    const stream = out_file.seekableStream();
+    const out_stream = out_file.seekableStream();
+
+    // TODO: can probably removed
+    _ = reader;
+    _ = in_stream;
 
     // ELF header
     const header = try result.elf_header.toEhdr();
-    try stream.seekTo(0);
+    try out_stream.seekTo(0);
     try writer.writeStruct(header);
-    assert(try stream.getPos() == @sizeOf(@TypeOf(header)));
+    assert(try out_stream.getPos() == @sizeOf(@TypeOf(header)));
 
-    // TODO: keep the file order as it was in the input
+    const endianess = try result.elf_header.getEndianess();
+
+    // TODO: align writer and fill gaps with 0
+    for (result.program_segments.items) |program| {
+        const phdr = program.toPhdr(endianess);
+        try writer.writeStruct(phdr);
+
+        // TODO: write program segment
+    }
+
+    // TODO: align writer and fill gaps with 0
+    for (result.sections.items) |section| {
+        const shdr = section.toShdr(endianess);
+        try writer.writeStruct(shdr);
+    }
+
+    for (result.sections.items) |section| {
+        // TODO: align writer and fill gaps with 0
+        switch (section.content) {
+            .data => |data| {
+                try out_stream.seekTo(section.shdr.sh_offset);
+                try writer.writeAll(data);
+            },
+            .no_bits => {},
+            .input_file_range => |range| {
+                const data = section.readContentAlloc(in_file, allocator) catch |err| {
+                    std.log.err("failed reading '{s}' section content at 0x{x} of size 0x{x} ({d}): {}", .{
+                        section.name,
+                        range.offset,
+                        range.size,
+                        range.size,
+                        err,
+                    });
+                    return err;
+                };
+
+                try out_stream.seekTo(section.shdr.sh_offset);
+                try writer.writeAll(data);
+            },
+        }
+    }
 }
 
 // Stores the parsed header with e_ident from the input file ELF header that is only partially parsed by std.elf.Header.parse.
@@ -1104,15 +1196,11 @@ const ElfHeader = struct {
     parsed: std.elf.Header,
 
     // Create the ELF header in the input file endianess
-    pub fn toEhdr(self: *const @This()) !std.elf.Ehdr {
+    fn toEhdr(self: *const @This()) !std.elf.Ehdr {
         const e = std.elf;
 
         // validate that the parsed fields have not diverged from e_ident
-        const endian: std.builtin.Endian = switch (self.e_ident[e.EI_DATA]) {
-            e.ELFDATA2LSB => .little,
-            e.ELFDATA2MSB => .big,
-            else => return error.InvalidElfEndian,
-        };
+        const endian = try self.getEndianess();
         assert(endian == self.parsed.endian);
 
         const e_ident_is_64 = switch (self.e_ident[e.EI_CLASS]) {
@@ -1134,13 +1222,9 @@ const ElfHeader = struct {
         // EI_PAD should be all zero
         assert(std.mem.eql(u8, self.e_ident[9..], &[_]u8{0} ** 7));
 
-        // TODO: swap bytes of all fields including e_ident if native endian does not match
-        const native_endian = @import("builtin").target.cpu.arch.endian();
-        if (endian != native_endian) return error.InvalidElfEndian;
-
         const e_flags = 0; // no EF_ flags supported
 
-        return e.Ehdr{
+        const header = e.Ehdr{
             .e_ident = self.e_ident,
             .e_type = self.parsed.type,
             .e_machine = self.parsed.machine,
@@ -1155,6 +1239,23 @@ const ElfHeader = struct {
             .e_shentsize = self.parsed.shentsize,
             .e_shnum = self.parsed.shnum,
             .e_shstrndx = self.parsed.shstrndx,
+        };
+
+        // TODO: swap bytes of all fields including e_ident if native endian does not match
+        const native_endian = @import("builtin").target.cpu.arch.endian();
+        if (endian != native_endian) {
+            // TODO: can't use std.mem.byteSwapAllFields due to e_ident
+            return error.InvalidElfEndian;
+        }
+
+        return header;
+    }
+
+    fn getEndianess(self: *const @This()) !std.builtin.Endian {
+        return switch (self.e_ident[std.elf.EI_DATA]) {
+            std.elf.ELFDATA2LSB => .little,
+            std.elf.ELFDATA2MSB => .big,
+            else => return error.InvalidElfEndian,
         };
     }
 };
