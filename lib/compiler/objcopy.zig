@@ -112,9 +112,9 @@ fn cmdObjCopy(
             // * Apply: apply modifications on the descriptor
             // * Process: process descritpro for simple ELF output
             // * Write: write new ELF file according to the processed descriptor
-            var input_descriptor = try parseElfDescriptor(arena, in_file);
-            defer input_descriptor.deinit();
-            try applyOptions(&input_descriptor, .{
+            var descriptor = try parseElfDescriptor(arena, in_file);
+            defer descriptor.deinit();
+            try applyOptions(&descriptor, .{
                 .strip_debug = options.strip_debug,
                 .strip_all = options.strip_all,
                 .only_keep_debug = options.only_keep_debug,
@@ -125,8 +125,8 @@ fn cmdObjCopy(
                 .set_section_alignment = options.set_section_alignment,
                 .set_section_flags = options.set_section_flags,
             });
-            const processed_descriptor = try processElfDescriptor(arena, input_descriptor);
-            try writeElf(arena, processed_descriptor, in_file, out_file);
+            try processElfDescriptor(arena, &descriptor);
+            try writeElf(arena, descriptor, in_file, out_file);
 
             return std.process.cleanExit();
         },
@@ -846,44 +846,33 @@ const Section = struct {
         no_bits: NoBits,
         data: Data,
 
-        fn fileSize(self: *const @This()) usize {
+        inline fn fileSize(self: *const @This()) usize {
             return switch (self.*) {
                 .input_file_range => |range| range.size,
                 .no_bits => 0, // no size in ELF file, only at runtime
                 .data => |data| data.len,
             };
         }
-    };
 
-    // Reduced section header that does not include fields that are computed from the content source.
-    // Using std.elf.Shdr would make the code hard to understand since it's unclear what needs to be writen in what step.
-    const SectionHeader = struct {
-        // sh_name: Elf64_Word,
-        sh_type: usize,
-        sh_flags: usize,
-        sh_addr: usize,
-        // sh_offset: usize,
-        // sh_size: usize,
-        sh_link: usize,
-        sh_info: usize,
-        sh_addralign: usize,
-        sh_entsize: usize,
+        inline fn headerSize(self: *const @This()) usize {
+            return switch (self.*) {
+                .input_file_range => |range| range.size,
+                .no_bits => |range| range.size,
+                .data => |data| data.len,
+            };
+        }
     };
 
     // TODO: heap allocation could be avoided using a union type of a slice or the input file offset but probably not worth the effort
     name: []const u8, // head allocated copy
-    // shdr: SectionHeader,
-    shdr: std.elf.Shdr,
-    content: ContentSource,
 
-    // Create the section header in the input file endianess
-    fn toShdr(self: *const @This(), target_endianess: std.builtin.Endian) std.elf.Shdr {
-        _ = target_endianess;
-        std.log.warn("TODO: apply endianess on copy if native does not match target", .{});
-        // std.mem.byteSwapAllFields(comptime S: type, ptr: *S)
-        _ = target_endianess;
-        return self.shdr;
-    }
+    // TODO: sh_name, sh_offset and sh_size may go out of sync and are fixed during processing. Is this avoidable?
+    // * sh_name: if any section name before was changed / removed / added
+    // * sh_offset: if any section content before was resized, have updated alignment or are reordered
+    // * sh_size: section content is overwritten
+    // => could extract functions on these operations to always update all sections immediately or store the affected fields separately
+    header: std.elf.Shdr,
+    content: ContentSource,
 
     // User has to free read memory
     fn readContentAlloc(self: *const @This(), input: anytype, allocator: std.mem.Allocator) ![]const u8 {
@@ -909,6 +898,14 @@ const Section = struct {
             },
         }
     }
+
+    // Create the section header in the input file endianess
+    fn toShdr(self: *const @This(), target_endianess: std.builtin.Endian) std.elf.Shdr {
+        _ = target_endianess;
+        std.log.warn("TODO: apply endianess on copy if native does not match target", .{});
+        // std.mem.byteSwapAllFields(comptime S: type, ptr: *S)
+        return self.header;
+    }
 };
 
 const ProgramSegment = struct {
@@ -925,7 +922,7 @@ const ProgramSegment = struct {
 
 // Describes what the result of objcopy is supposed to look like.
 const ElfDescriptor = struct {
-    elf_header: ElfHeader,
+    header: ElfHeader,
     sections: std.ArrayList(Section),
     program_segments: std.ArrayList(ProgramSegment),
     // heap allocated section name table copy that section names hold slices to
@@ -941,12 +938,12 @@ const ElfDescriptor = struct {
     }
 };
 
-inline fn isStringTable(shdr: std.elf.Shdr) bool {
+inline fn isStringTable(shdr: anytype) bool {
     return shdr.sh_type == std.elf.SHT_STRTAB;
 }
 
 inline fn isSectionInFile(shdr: std.elf.Shdr) bool {
-    return shdr.sh_type != std.elf.SHT_NOBITS and (shdr.sh_flags & std.elf.SHF_ALLOC) != 0;
+    return shdr.sh_type != std.elf.SHT_NOBITS;
 }
 
 fn parseElfDescriptor(allocator: Allocator, input: anytype) !ElfDescriptor {
@@ -982,7 +979,7 @@ fn parseElfDescriptor(allocator: Allocator, input: anytype) !ElfDescriptor {
 
                 break :strtab Section{
                     .name = ".strtab",
-                    .shdr = section,
+                    .header = section,
                     .content = .{ .input_file_range = .{ .offset = section.sh_offset, .size = section.sh_size } },
                 };
             }
@@ -1007,7 +1004,7 @@ fn parseElfDescriptor(allocator: Allocator, input: anytype) !ElfDescriptor {
 
             try sections.append(.{
                 .name = name,
-                .shdr = section,
+                .header = section,
                 .content = content,
             });
         }
@@ -1020,7 +1017,7 @@ fn parseElfDescriptor(allocator: Allocator, input: anytype) !ElfDescriptor {
     }
 
     return .{
-        .elf_header = .{ .e_ident = e_ident, .parsed = header },
+        .header = .{ .e_ident = e_ident, .parsed = header },
         .sections = sections,
         .program_segments = program_segments,
         .string_table_content = string_table_content,
@@ -1046,16 +1043,21 @@ fn applyOptions(descriptor: *ElfDescriptor, options: StripElfOptions) !void {
     // TODO: options.compress_debug
 
     if (options.add_section) |add| {
+        // Place new section at offset of the largest existing section
+        var offset: usize = 0;
+        for (descriptor.sections.items) |section| {
+            const end = section.header.sh_offset + section.header.sh_size;
+            if (end > offset) offset = end;
+        }
+
         try descriptor.sections.append(.{
             .name = add.section_name,
-            .shdr = .{
-                .sh_name = 0, // NOTE: filled after strtab was rebuilt
+            .header = .{
+                .sh_name = 0, // NOTE: will be filled during processing
                 .sh_type = std.elf.SHT_PROGBITS,
                 .sh_flags = no_flags,
                 .sh_addr = not_mapped,
-                // FIXME: still needs to have the largest address to be appendended since the sections are sorted
-                // => what's a simple approach here to achieve this?
-                .sh_offset = 99999999999, // NOTE: filled after strtab was rebuilt
+                .sh_offset = offset,
                 .sh_size = add.content.len,
                 .sh_link = std.elf.SHN_UNDEF,
                 .sh_info = std.elf.SHN_UNDEF,
@@ -1069,7 +1071,7 @@ fn applyOptions(descriptor: *ElfDescriptor, options: StripElfOptions) !void {
     if (options.set_section_alignment) |alignment| {
         for (descriptor.sections.items) |*section| {
             if (std.mem.eql(u8, section.name, alignment.section_name)) {
-                section.shdr.sh_addralign = alignment.alignment;
+                section.header.sh_addralign = alignment.alignment;
                 break;
             }
         } else fatal("Section '{s}' to change alignment on does not exist", .{alignment.section_name});
@@ -1079,7 +1081,7 @@ fn applyOptions(descriptor: *ElfDescriptor, options: StripElfOptions) !void {
         for (descriptor.sections.items) |*section| {
             if (std.mem.eql(u8, section.name, set_flags.section_name)) {
                 const f = set_flags.flags;
-                const shdr = &section.shdr;
+                const shdr = &section.header;
                 shdr.sh_flags = std.elf.SHF_WRITE; // default is writable cleared by "readonly"
 
                 // Supporting a subset of GNU and LLVM objcopy for ELF only
@@ -1104,7 +1106,7 @@ fn applyOptions(descriptor: *ElfDescriptor, options: StripElfOptions) !void {
                 if (f.code) shdr.sh_flags |= std.elf.SHF_EXECINSTR;
                 if (f.exclude) shdr.sh_flags |= std.elf.SHF_EXCLUDE;
                 if (f.large) {
-                    if (descriptor.elf_header.parsed.machine != std.elf.EM.X86_64)
+                    if (descriptor.header.parsed.machine != std.elf.EM.X86_64)
                         fatal("zig objcopy: 'large' section flag is only supported on x86_64 targets", .{});
                     shdr.sh_flags |= std.elf.SHF_X86_64_LARGE;
                 }
@@ -1120,106 +1122,110 @@ fn applyOptions(descriptor: *ElfDescriptor, options: StripElfOptions) !void {
     }
 }
 
-const ProcessedElfDescriptor = struct {
-    header: ElfHeader,
-    ordered_sections: std.ArrayList(Section),
-    program_segments: std.ArrayList(ProgramSegment),
-};
+const ProcessedElfDescriptor = ElfDescriptor;
 
 // Process ELF objcopy descriptor to allow simple writing and testing by ensuring simplifying postconditions:
-// * sections are ordered by their ascending file offsets
 // * section file offsets and sizes are updated and account:
 //   * resized sections
 //   * deleted or new sections in between
 //   * alignment changes
 // * ELF header section and program header table offsets are updated
 // * ELF header section name string table index is updated
-fn processElfDescriptor(allocator: Allocator, descriptor: ElfDescriptor) !ProcessedElfDescriptor {
-    // TODO: copy array lists or modify in place? More efficient but side effects are nasty for testing...
-    const desc = descriptor;
-    const elf_header = desc.elf_header.parsed;
+fn processElfDescriptor(allocator: Allocator, descriptor: *ElfDescriptor) !void {
+    const sections = &descriptor.sections;
+    const header = &descriptor.header;
 
     // rebuild string table section and update all sh_name offsets
-    const section_string_table_index = elf_header.shstrndx;
+    const section_string_table_index = header.parsed.shstrndx;
     {
         var strtab_size: usize = 0;
-        for (desc.sections.items) |section| strtab_size += section.name.len + 1; // + 1 for sentinel
+        for (sections.items) |section| strtab_size += section.name.len + 1; // + 1 for sentinel
 
-        const strtab_content = try allocator.alloc(u8, strtab_size);
-        @memset(strtab_content, 0);
+        const shstrtab_content = try allocator.alloc(u8, strtab_size);
+        @memset(shstrtab_content, 0);
+        defer {
+            descriptor.string_table_content_allocator.free(descriptor.string_table_content);
+            descriptor.string_table_content = shstrtab_content;
+        }
 
         var offset: usize = 0;
-        for (desc.sections.items) |*section| {
+        for (sections.items) |*section| {
             defer offset += section.name.len + 1;
-            @memcpy(strtab_content[offset .. offset + section.name.len], section.name);
-            strtab_content[offset + section.name.len] = 0;
-            section.shdr.sh_name = @intCast(offset);
+            @memcpy(shstrtab_content[offset .. offset + section.name.len], section.name);
+            shstrtab_content[offset + section.name.len] = 0;
+            section.header.sh_name = @intCast(offset);
         }
-        assert(strtab_content[0] == 0); // expect 0 for null section with an empty name
+        assert(shstrtab_content[0] == 0); // expect 0 for null section with an empty name
 
-        const section = &desc.sections.items[section_string_table_index];
-        assert(isStringTable(section.shdr));
-        section.content = .{ .data = strtab_content };
-        section.shdr.sh_size = strtab_content.len; // NOTE: not necessary, will be update after ordering again
+        const shstrtab = &sections.items[section_string_table_index];
+        assert(isStringTable(shstrtab.header));
+        shstrtab.content = .{ .data = shstrtab_content };
+        shstrtab.header.sh_size = shstrtab_content.len; // optional, size will be updated again
     }
 
-    // sort sections by ascending file offsets
-    const sorted_sections = try desc.sections.clone();
-    const SortCommands = struct {
-        fn lessThanFn(context: *@This(), lhs: Section, rhs: Section) bool {
-            _ = context;
-            return lhs.shdr.sh_offset < rhs.shdr.sh_offset;
-        }
+    // sort section pointers ascending to file offsets excluding the null section
+    const ordered_sections = ordered: {
+        const no_null = sections.items[1..];
+        var pointers = try std.ArrayList(*Section).initCapacity(allocator, no_null.len);
+        for (no_null) |*section| pointers.appendAssumeCapacity(section);
+
+        const SortContext = struct {
+            fn lessThanFn(context: *@This(), lhs: *Section, rhs: *Section) bool {
+                _ = context;
+                return lhs.header.sh_offset < rhs.header.sh_offset;
+            }
+        };
+        var sort = SortContext{};
+        std.mem.sort(*Section, pointers.items, &sort, SortContext.lessThanFn);
+
+        break :ordered pointers;
     };
-    var sort = SortCommands{};
-    // FIXME: shift the section name string table index when reordering and update the header
-    std.mem.sort(Section, sorted_sections.items, &sort, SortCommands.lessThanFn);
+    defer ordered_sections.deinit();
 
     // recompute section sizes and offsets with correct alignment
     {
-        var offset: usize = @sizeOf(std.elf.Ehdr) + desc.program_segments.items.len * @sizeOf(std.elf.Phdr) + desc.sections.items.len * @sizeOf(std.elf.Shdr);
-        // start at index 1 to skip null section
-        for (sorted_sections.items[1..]) |*section| {
+        var previous_offset: usize = @sizeOf(std.elf.Ehdr) + descriptor.program_segments.items.len * @sizeOf(std.elf.Phdr) + descriptor.sections.items.len * @sizeOf(std.elf.Shdr);
+        for (ordered_sections.items) |section| {
             const default_alignment = 8; // FIXME: 8 byte alignment required?
-            const alignment = @max(default_alignment, section.shdr.sh_addralign);
-            const size = section.content.fileSize();
-            const new_offset = std.mem.alignForward(usize, offset + size, alignment);
-            defer offset = new_offset;
+            const alignment = @max(default_alignment, section.header.sh_addralign);
+            // TODO: compacts sections even if they're not changed
+            // => only relocate if necessary, e.g. if the previous sections have increased in size
+            const offset = std.mem.alignForward(usize, previous_offset, alignment);
 
-            section.shdr.sh_offset = offset;
-            section.shdr.sh_size = size;
+            // NOTE: SHT_NOBITS sections like .bss store the runtime size in sh_size, not the file offset
+            // TODO: add test that .bss does not shift section offsets
+            const size = section.content.fileSize();
+            const size_header = section.content.headerSize();
+            defer previous_offset = offset + size;
+
+            section.header.sh_offset = offset;
+            section.header.sh_size = size_header;
         }
     }
 
-    // FIXME: always moves headers to the top even if there is no need for it
-    // Is this a reasonable limitation for now?
+    // TODO: always moves headers to the top even if there is no need for it
+    // Is this a reasonable limitation for now? Relocating only if necessary should not be too hard
     const new_program_header_offset = @sizeOf(std.elf.Ehdr);
-    const new_section_header_offset = new_program_header_offset + desc.program_segments.items.len * @sizeOf(std.elf.Phdr);
+    const new_section_header_offset = new_program_header_offset + descriptor.program_segments.items.len * @sizeOf(std.elf.Phdr);
 
-    const new_header = ElfHeader{
-        .e_ident = desc.elf_header.e_ident,
+    header.* = ElfHeader{
+        .e_ident = descriptor.header.e_ident,
         .parsed = .{
-            .is_64 = elf_header.is_64,
-            .endian = elf_header.endian,
-            .os_abi = elf_header.os_abi,
-            .abi_version = elf_header.abi_version,
-            .type = elf_header.type,
-            .machine = elf_header.machine,
-            .entry = elf_header.entry,
+            .is_64 = header.parsed.is_64,
+            .endian = header.parsed.endian,
+            .os_abi = header.parsed.os_abi,
+            .abi_version = header.parsed.abi_version,
+            .type = header.parsed.type,
+            .machine = header.parsed.machine,
+            .entry = header.parsed.entry,
             .phoff = new_program_header_offset,
             .shoff = new_section_header_offset,
-            .phentsize = elf_header.phentsize,
-            .phnum = @intCast(desc.program_segments.items.len),
-            .shentsize = elf_header.shentsize,
-            .shnum = @intCast(desc.sections.items.len),
+            .phentsize = header.parsed.phentsize,
+            .phnum = @intCast(descriptor.program_segments.items.len),
+            .shentsize = header.parsed.shentsize,
+            .shnum = @intCast(descriptor.sections.items.len),
             .shstrndx = @intCast(section_string_table_index),
         },
-    };
-
-    return .{
-        .header = new_header,
-        .ordered_sections = sorted_sections,
-        .program_segments = desc.program_segments,
     };
 }
 
@@ -1233,7 +1239,7 @@ fn writeElf(allocator: Allocator, desc: ProcessedElfDescriptor, in_file: anytype
     const out_stream = out_file.seekableStream();
 
     const header = &desc.header;
-    const sections = &desc.ordered_sections;
+    const sections = &desc.sections;
     const program_segments = &desc.program_segments;
     const endianess = try header.getEndianess();
 
@@ -1250,15 +1256,10 @@ fn writeElf(allocator: Allocator, desc: ProcessedElfDescriptor, in_file: anytype
     for (sections.items) |section| try writer.writeStruct(section.toShdr(endianess));
 
     // section content
-    // TODO: offsets are not adjusted yet, so some sections will overwrite parts of other sections / section headers
     for (sections.items) |section| {
-        // TODO: fill gaps with 0
-        const alignment = @max(1, section.shdr.sh_addralign);
-        try out_stream.seekTo(std.mem.alignForward(usize, try out_stream.getPos(), alignment));
-
         switch (section.content) {
             .data => |data| {
-                try out_stream.seekTo(section.shdr.sh_offset);
+                try out_stream.seekTo(section.header.sh_offset);
                 try writer.writeAll(data);
             },
             .no_bits => {},
@@ -1273,8 +1274,9 @@ fn writeElf(allocator: Allocator, desc: ProcessedElfDescriptor, in_file: anytype
                     });
                     return err;
                 };
+                defer allocator.free(data);
 
-                try out_stream.seekTo(section.shdr.sh_offset);
+                try out_stream.seekTo(section.header.sh_offset);
                 try writer.writeAll(data);
             },
         }
@@ -1579,8 +1581,8 @@ test "objcopy ELF no operation integration test" {
     var descriptor = try parseElfDescriptor(allocator, &in_buffer_stream);
     defer descriptor.deinit();
     try applyOptions(&descriptor, .{});
-    const processed_descriptor = try processElfDescriptor(allocator, descriptor);
-    try writeElf(allocator, processed_descriptor, &in_buffer_stream, &out_buffer_stream);
+    try processElfDescriptor(allocator, &descriptor);
+    try writeElf(allocator, descriptor, &in_buffer_stream, &out_buffer_stream);
 
     try t.expectEqualSlices(u8, &in_buffer, &out_buffer);
 }
@@ -1603,171 +1605,16 @@ test "objcopy --add-section --set-section-alignment" {
     try t.expectEqual(3, descriptor.sections.items.len);
     try t.expectEqualStrings(".new", descriptor.sections.items[2].name);
     try t.expectEqualStrings("abc123", descriptor.sections.items[2].content.data);
-    try t.expectEqual(32, descriptor.sections.items[2].shdr.sh_addralign);
-}
-
-// Test objcopy with section that are not ordered ascending wrt. their file offsets.
-test "objcopy ELF unordered sections" {
-    const allocator = t.allocator;
-
-    const program_header_table_offset = @sizeOf(std.elf.Ehdr);
-    const program_header_count = 0;
-    const section_header_table_offset = 104;
-    const section_header_count = 4; // null section + strtab + 2 test sections
-    const section_name_string_table_index = 1;
-    const section_alignment = 8;
-    const section_not_mapped = 0;
-    const section_dynamic_size = 0;
-
-    const e_ident = std.elf.MAGIC ++ [_]u8{std.elf.ELFCLASS64} ++ [_]u8{std.elf.ELFDATA2LSB} ++ [_]u8{std.elf.EV_CURRENT} ++ [_]u8{@intFromEnum(std.elf.OSABI.GNU)} ++ [_]u8{0} ++ [_]u8{0} ** 7;
-
-    const elf_header = ElfHeader{
-        .e_ident = e_ident.*,
-        .parsed = .{
-            .is_64 = true,
-            .endian = .little,
-            .os_abi = std.elf.OSABI.GNU,
-            .abi_version = 0,
-            .type = std.elf.ET.EXEC,
-            .machine = .X86_64,
-            .entry = 0,
-            .phoff = program_header_table_offset,
-            .shoff = section_header_table_offset,
-            .phentsize = @sizeOf(std.elf.Elf64_Phdr),
-            .phnum = program_header_count,
-            .shentsize = @sizeOf(std.elf.Elf64_Shdr),
-            .shnum = section_header_count,
-            .shstrndx = section_name_string_table_index,
-        },
-    };
-
-    const test_section_size = 8;
-    const test_buffer_size = 512;
-    var in_buffer = [_]u8{0} ** test_buffer_size;
-    var in_buffer_stream = std.io.FixedBufferStream([]u8){ .buffer = &in_buffer, .pos = 0 };
-
-    // header
-    const in_buffer_writer = in_buffer_stream.writer();
-    try in_buffer_writer.writeStruct(try elf_header.toEhdr());
-
-    // section name string table before section headers for simple offsets
-    const string_table_section_offset = try in_buffer_stream.getPos();
-    try in_buffer_writer.writeByte(0); // 0 for null section without a name
-
-    const shstrtab_name = try in_buffer_stream.getPos();
-    try in_buffer_writer.writeAll(".shstrtab");
-    try in_buffer_writer.writeByte(0);
-
-    const high_name = try in_buffer_stream.getPos();
-    try in_buffer_writer.writeAll(".high");
-    try in_buffer_writer.writeByte(0);
-
-    const low_name = try in_buffer_stream.getPos();
-    try in_buffer_writer.writeAll(".low");
-    try in_buffer_writer.writeByte(0);
-    const string_table_section_end = try in_buffer_stream.getPos();
-
-    try in_buffer_stream.seekTo(std.mem.alignForward(usize, try in_buffer_stream.getPos(), section_alignment));
-    const test_low_offset = try in_buffer_stream.getPos();
-    try in_buffer_writer.writeByteNTimes(0, test_section_size);
-    const test_high_offset = try in_buffer_stream.getPos();
-    try in_buffer_writer.writeByteNTimes(0, test_section_size);
-
-    // section headers
-    try in_buffer_stream.seekTo(std.mem.alignForward(usize, try in_buffer_stream.getPos(), section_alignment));
-    try std.testing.expectEqual(section_header_table_offset, try in_buffer_stream.getPos());
-
-    const null_section_header = [_]u8{0} ** @sizeOf(std.elf.Shdr);
-    try in_buffer_writer.writeAll(&null_section_header);
-
-    // string section
-    try in_buffer_writer.writeStruct(std.elf.Shdr{
-        .sh_name = @intCast(shstrtab_name - string_table_section_offset),
-        .sh_type = std.elf.SHT_STRTAB,
-        .sh_flags = std.elf.SHF_STRINGS,
-        .sh_addr = section_not_mapped,
-        .sh_offset = string_table_section_offset,
-        .sh_size = string_table_section_end - string_table_section_offset,
-        .sh_link = 0,
-        .sh_info = 0,
-        .sh_addralign = 1,
-        .sh_entsize = section_dynamic_size,
-    });
-
-    // test section with high offset before low offset
-    try in_buffer_writer.writeStruct(std.elf.Shdr{
-        .sh_name = @intCast(high_name - string_table_section_offset),
-        .sh_type = std.elf.SHT_PROGBITS,
-        .sh_flags = std.elf.SHF_ALLOC,
-        .sh_addr = section_not_mapped,
-        .sh_offset = test_high_offset,
-        .sh_size = test_section_size,
-        .sh_link = 0,
-        .sh_info = 0,
-        .sh_addralign = section_alignment,
-        .sh_entsize = section_dynamic_size,
-    });
-
-    try in_buffer_writer.writeStruct(std.elf.Shdr{
-        .sh_name = @intCast(low_name - string_table_section_offset),
-        .sh_type = std.elf.SHT_PROGBITS,
-        .sh_flags = std.elf.SHF_ALLOC,
-        .sh_addr = section_not_mapped,
-        .sh_offset = test_low_offset,
-        .sh_size = test_section_size,
-        .sh_link = 0,
-        .sh_info = 0,
-        .sh_addralign = section_alignment,
-        .sh_entsize = section_dynamic_size,
-    });
-
-    const out_descriptor = try parseElfDescriptor(allocator, &in_buffer_stream);
-    defer out_descriptor.deinit();
-
-    try t.expectEqual(program_header_count, out_descriptor.program_segments.items.len);
-    try t.expectEqual(section_header_count, out_descriptor.sections.items.len);
-
-    // null section
-    try t.expectEqualStrings("", out_descriptor.sections.items[0].name);
-    try t.expectEqual(std.mem.zeroes(std.elf.Shdr), out_descriptor.sections.items[0].shdr);
-
-    // shstrtab
-    try t.expectEqualStrings(".shstrtab", out_descriptor.sections.items[1].name);
-
-    // high
-    try t.expectEqualStrings(".high", out_descriptor.sections.items[2].name);
-    try t.expectEqual(test_high_offset, out_descriptor.sections.items[2].content.input_file_range.offset);
-    try t.expectEqual(test_section_size, out_descriptor.sections.items[2].content.input_file_range.size);
-
-    // low
-    try t.expectEqualStrings(".low", out_descriptor.sections.items[3].name);
-    try t.expectEqual(test_low_offset, out_descriptor.sections.items[3].content.input_file_range.offset);
-    try t.expectEqual(test_section_size, out_descriptor.sections.items[3].content.input_file_range.size);
-
-    const processed = try processElfDescriptor(allocator, out_descriptor);
-    // TODO: clarify what needs to be deleted and when. Use tagged union to distinguish copied sections?
-    defer processed.ordered_sections.deinit(); // FIXME: temporary hack
-    defer allocator.free(processed.ordered_sections.items[1].content.data); // FIXME: temporary hack
-
-    const ordered = processed.ordered_sections;
-    try t.expectEqualStrings("", ordered.items[0].name);
-    try t.expectEqualStrings(".shstrtab", ordered.items[1].name);
-
-    // test that the sections are reordered by their file offset
-    try t.expectEqualStrings(".low", ordered.items[2].name);
-    try t.expectEqualStrings(".high", ordered.items[3].name);
-
-    try t.expectEqual(test_low_offset, ordered.items[2].content.input_file_range.offset);
-    try t.expectEqual(test_high_offset, ordered.items[3].content.input_file_range.offset);
+    try t.expectEqual(32, descriptor.sections.items[2].header.sh_addralign);
 }
 
 // Test adding a section which appends a section header entry and bytes but also increases the strtab sizes that
 // pushes down all following sections that need to be realligned correctly.
 test "objcopy ELF add section" {
-    if (true) return; // FIXME: reenable
-
     const allocator = t.allocator;
 
+    const program_header_count = 0;
+    const section_header_count = 3; // null section + shstrtab + test section,
     const section_alignment = 8;
     const section_not_mapped = 0;
     const section_dynamic_size = 0;
@@ -1780,7 +1627,7 @@ test "objcopy ELF add section" {
     @memcpy(string_table_content, string_table_content_raw);
 
     var descriptor = ElfDescriptor{
-        .elf_header = .{
+        .header = .{
             .e_ident = e_ident.*,
             .parsed = .{
                 .is_64 = true,
@@ -1793,9 +1640,9 @@ test "objcopy ELF add section" {
                 .phoff = 1024, // somewhere after sections content
                 .shoff = 2048,
                 .phentsize = @sizeOf(std.elf.Elf64_Phdr),
-                .phnum = 0,
+                .phnum = program_header_count,
                 .shentsize = @sizeOf(std.elf.Elf64_Shdr),
-                .shnum = 3, // null section + shstrtab + test section,
+                .shnum = section_header_count,
                 .shstrndx = 1,
             },
         },
@@ -1807,12 +1654,12 @@ test "objcopy ELF add section" {
     defer descriptor.deinit();
 
     // null section
-    try descriptor.sections.append(.{ .name = "", .content = .{ .no_bits = .{ .offset = 0, .size = 0 } }, .shdr = std.mem.zeroes(std.elf.Shdr) });
+    try descriptor.sections.append(.{ .name = "", .content = .{ .no_bits = .{ .offset = 0, .size = 0 } }, .header = std.mem.zeroes(std.elf.Shdr) });
 
     try descriptor.sections.append(.{
         .name = ".shstrtab",
         .content = .{ .data = string_table_content },
-        .shdr = .{
+        .header = .{
             .sh_name = does_not_matter,
             .sh_type = std.elf.SHT_STRTAB,
             .sh_flags = 0,
@@ -1827,12 +1674,13 @@ test "objcopy ELF add section" {
     });
 
     // offset with the new section name not added yet
-    const test_offset = @sizeOf(std.elf.Ehdr) + std.mem.alignForward(usize, string_table_content.len, section_alignment);
+    // FIXME: too complicated. Uses knowledge that the section headers are placed at the top of the file
+    const test_offset = @sizeOf(std.elf.Ehdr) + program_header_count * @sizeOf(std.elf.Phdr) + section_header_count * @sizeOf(std.elf.Shdr) + std.mem.alignForward(usize, string_table_content.len, section_alignment);
 
     try descriptor.sections.append(.{
         .name = ".test",
         .content = .{ .data = "test123" },
-        .shdr = .{
+        .header = .{
             .sh_name = does_not_matter,
             .sh_type = std.elf.SHT_PROGBITS,
             .sh_flags = std.elf.SHF_ALLOC,
@@ -1849,12 +1697,12 @@ test "objcopy ELF add section" {
     try descriptor.sections.append(.{
         .name = ".new",
         .content = .{ .data = "abc" },
-        .shdr = .{
+        .header = .{
             .sh_name = does_not_matter,
             .sh_type = std.elf.SHT_PROGBITS,
             .sh_flags = std.elf.SHF_ALLOC,
             .sh_addr = section_not_mapped,
-            .sh_offset = test_offset + 30,
+            .sh_offset = test_offset + 8,
             .sh_size = 8,
             .sh_link = 0,
             .sh_info = 0,
@@ -1863,23 +1711,22 @@ test "objcopy ELF add section" {
         },
     });
 
-    const processed = try processElfDescriptor(allocator, descriptor);
-    const ordered = processed.ordered_sections;
-    try t.expectEqual(4, ordered.items.len);
+    try processElfDescriptor(allocator, &descriptor);
+    const sections = descriptor.sections;
+    try t.expectEqual(4, sections.items.len);
 
-    try t.expectEqualStrings("", ordered.items[0].name);
-    try t.expectEqualStrings(".shstrtab", ordered.items[1].name);
-    try t.expectEqualStrings(".test", ordered.items[2].name);
-    try t.expectEqualStrings(".new", ordered.items[3].name);
+    try t.expectEqualStrings("", sections.items[0].name);
+    try t.expectEqualStrings(".shstrtab", sections.items[1].name);
+    try t.expectEqualStrings(".test", sections.items[2].name);
+    try t.expectEqualStrings(".new", sections.items[3].name);
 
     // shstrtab is larger due to new section name
-    const new_section_name_length = 5;
-    const expected_new_shstrtab_size = string_table_content.len + new_section_name_length;
-    try t.expectEqual(expected_new_shstrtab_size, ordered.items[1].shdr.sh_size);
+    const expected_new_shstrtab_size = string_table_content.len + descriptor.sections.items[3].name.len + 1;
+    try t.expectEqual(expected_new_shstrtab_size, sections.items[1].header.sh_size);
 
-    // existing section is pushed down by the new section name
-    try t.expectEqual(test_offset + section_alignment, ordered.items[2].shdr.sh_offset);
+    // existing section is pushed down by the new section
+    try t.expectEqual(test_offset + @sizeOf(std.elf.Shdr), sections.items[2].header.sh_offset);
 
     // new section is added directly after the last section
-    try t.expectEqual(ordered.items[2].shdr.sh_offset + section_alignment, ordered.items[3].shdr.sh_offset);
+    try t.expectEqual(sections.items[2].header.sh_offset + section_alignment, sections.items[3].header.sh_offset);
 }
