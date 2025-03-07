@@ -8,6 +8,7 @@ const Type = @import("Type.zig");
 const Air = @import("Air.zig");
 const Liveness = @import("Liveness.zig");
 const InternPool = @import("InternPool.zig");
+const export_air = @import("export_air.zig");
 
 pub fn write(stream: anytype, pt: Zcu.PerThread, air: Air, liveness: ?Liveness) void {
     const instruction_bytes = air.instructions.len *
@@ -72,10 +73,12 @@ pub fn writeInst(
 
 pub fn dump(pt: Zcu.PerThread, air: Air, liveness: ?Liveness) void {
     write(std.io.getStdErr().writer(), pt, air, liveness);
+    export_air.exportAir(pt, air, liveness);
 }
 
 pub fn dumpInst(inst: Air.Inst.Index, pt: Zcu.PerThread, air: Air, liveness: ?Liveness) void {
     writeInst(std.io.getStdErr().writer(), inst, pt, air, liveness);
+    export_air.exportAirInst(inst, pt, air, liveness);
 }
 
 const Writer = struct {
