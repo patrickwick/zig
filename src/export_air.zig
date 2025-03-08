@@ -70,20 +70,15 @@ pub const AirImported = struct {
 pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImported {
     const header = try reader.readStruct(AirHeader);
 
-    const tags = try allocator.alloc(Air.Inst.Tag, header.instruction_count);
-    defer allocator.free(tags);
-    _ = try reader.readAll(@ptrCast(tags));
-
-    const data = try allocator.alloc(Air.Inst.Data, header.instruction_count);
-    defer allocator.free(data);
-    _ = try reader.readAll(@ptrCast(data));
-
-    // TODO: can multi array list be constructed directly without the additional copy?
-    // => resize then read directly into .items(.tag)
     var instructions = std.MultiArrayList(Air.Inst){};
     errdefer instructions.deinit(allocator);
-    try instructions.ensureTotalCapacity(allocator, header.instruction_count);
-    for (tags, data) |tag, variant| instructions.appendAssumeCapacity(.{ .tag = tag, .data = variant });
+    try instructions.resize(allocator, header.instruction_count);
+
+    const tag_bytes_read = try reader.readAll(@ptrCast(instructions.items(.tag)));
+    std.debug.assert(tag_bytes_read == header.instruction_count * @sizeOf(Air.Inst.Tag));
+
+    const data_bytes_read = try reader.readAll(@ptrCast(instructions.items(.data)));
+    std.debug.assert(data_bytes_read == header.instruction_count * @sizeOf(Air.Inst.Data));
 
     return .{
         .air = .{
