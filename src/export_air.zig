@@ -250,9 +250,25 @@ test exportAir {
     // Decode and assert exported data.
     // TODO: extract decode/import function.
     {
-        try export_buffer_stream.seekTo(0);
-        const reader = export_buffer_stream.reader();
-        const header = try reader.readStruct(AirHeader);
+        var offset: usize = 0;
+        const header: *align(1) const AirHeader = @alignCast(@ptrCast(&export_buffer[offset]));
+        offset += @sizeOf(AirHeader);
         try t.expectEqual(instructions.len, header.instruction_count);
+
+        const tags_pointer: [*]align(1) const Air.Inst.Tag = @alignCast(@ptrCast(&export_buffer[offset]));
+        const tags = tags_pointer[0..header.instruction_count];
+        offset += header.instruction_count * @sizeOf(Air.Inst.Tag);
+
+        const variants_pointer: [*]align(1) const Air.Inst.Data = @alignCast(@ptrCast(&export_buffer[offset]));
+        const variants = variants_pointer[0..header.instruction_count];
+        offset += header.instruction_count * @sizeOf(Air.Inst.Data);
+
+        // try t.expectEqualSlices(Air.Inst.Tag, instructions.items(.tag), tags);
+        // try t.expectEqualSlices(u8, std.mem.sliceAsBytes(instructions.items(.data)), std.mem.sliceAsBytes(variants));
+        for (tags, variants, instructions.items(.tag), instructions.items(.data)) |tag, variant, expected_tag, expected_variant| {
+            try t.expectEqual(expected_tag, tag);
+            const DataType = *align(1) const u64;
+            try t.expectEqual(@as(DataType, @ptrCast(&expected_variant)).*, @as(DataType, @ptrCast(&variant)).*);
+        }
     }
 }
