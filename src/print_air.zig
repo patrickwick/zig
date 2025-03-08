@@ -92,7 +92,7 @@ pub fn dump(pt: Zcu.PerThread, air: Air, liveness: ?Liveness, function_name: []c
         return;
     };
     defer file.close();
-    export_air.exportAir(file.writer().any(), pt, air, liveness);
+    export_air.exportAir(file.writer().any(), pt, air, liveness, function_name);
 }
 
 pub fn dumpInst(inst: Air.Inst.Index, pt: Zcu.PerThread, air: Air, liveness: ?Liveness) void {

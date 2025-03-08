@@ -11,14 +11,19 @@ const Zcu = @import("Zcu.zig");
 
 /// Dumped AIR header with C ABI type for stability.
 pub const AirHeader = extern struct {
-    // TODO: use entry or byte counts?
+    /// Total size of the function AIR data and function name.
+    byte_size: usize,
+    function_name_length: usize,
     instruction_count: u64, // in entries, not bytes
     extra_data_count: u64, // in entries, not bytes
 };
 
 /// Export AIR for all instructions. The main body can be filtered from the instruction indexes stored in extra data.
-pub fn exportAir(writer: std.io.AnyWriter, zcu_per_thread: Zcu.PerThread, air: Air, liveness: ?Liveness) void {
+pub fn exportAir(writer: std.io.AnyWriter, zcu_per_thread: Zcu.PerThread, air: Air, liveness: ?Liveness, function_name: []const u8) void {
+    const total_size = std.mem.alignForward(usize, air.instructions.len * @sizeOf(Air.Inst) + air.extra.len * @sizeOf(@TypeOf(air.extra[0])), 8);
     const header = AirHeader{
+        .byte_size = total_size,
+        .function_name_length = function_name.len,
         .instruction_count = @intCast(air.instructions.len),
         .extra_data_count = @intCast(air.extra.len),
     };
@@ -26,6 +31,8 @@ pub fn exportAir(writer: std.io.AnyWriter, zcu_per_thread: Zcu.PerThread, air: A
     {
         errdefer @panic("exportAir writer failed"); // TODO: handle properly
         try writer.writeStruct(header);
+        // NOTE: no alignment after function name!
+        try writer.writeAll(function_name);
         try writer.writeAll(@ptrCast(air.instructions.items(.tag)));
         try writer.writeAll(@ptrCast(air.instructions.items(.data)));
         try writer.writeAll(@ptrCast(air.extra));
@@ -61,6 +68,8 @@ pub fn exportAirInst(writer: std.io.AnyWriter, instruction_index: Air.Inst.Index
 // It's important for an external tools to compile this quickly without the entire Zig compiler as a dependency.
 // => add extern functions to link against this as a library? Then it wouldn't recompile all the time.
 pub const AirImported = struct {
+    header: AirHeader,
+    function_name: []const u8,
     air: Air,
     /// Instructions owned by the caller that needs to free it using the provided allocator.
     instructions_owned: std.MultiArrayList(Air.Inst),
@@ -68,6 +77,7 @@ pub const AirImported = struct {
 
     pub fn deinit(self: *@This()) void {
         self.instructions_owned.deinit(self.allocator);
+        self.allocator.free(self.function_name);
         self.allocator.free(self.air.extra);
     }
 };
@@ -78,6 +88,11 @@ pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImp
     var instructions = std.MultiArrayList(Air.Inst){};
     errdefer instructions.deinit(allocator);
     try instructions.resize(allocator, header.instruction_count);
+
+    const function_name = try allocator.alloc(u8, header.function_name_length);
+    errdefer allocator.free(function_name);
+    const function_name_bytes_read = try reader.readAll(function_name);
+    std.debug.assert(function_name_bytes_read == header.function_name_length * @sizeOf(u8));
 
     const tag_bytes_read = try reader.readAll(@ptrCast(instructions.items(.tag)));
     std.debug.assert(tag_bytes_read == header.instruction_count * @sizeOf(Air.Inst.Tag));
@@ -92,6 +107,8 @@ pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImp
     std.debug.assert(extra_bytes_read == header.extra_data_count * @sizeOf(Extra));
 
     return .{
+        .header = header,
+        .function_name = function_name,
         .air = .{
             .instructions = instructions.slice(),
             .extra = extra,
@@ -288,12 +305,16 @@ test exportAir {
         const buffer_size = 1024;
         var buffer = [1]u8{0} ** buffer_size;
         var stream = std.io.FixedBufferStream([]u8){ .buffer = &buffer, .pos = 0 };
-        exportAir(stream.writer().any(), zcu_per_thread, air, null);
+        const liveness = null;
+        const function_name = "test.main";
+        exportAir(stream.writer().any(), zcu_per_thread, air, liveness, function_name);
 
         try stream.seekTo(0);
         var imported = try importAir(allocator, stream.reader().any());
         defer imported.deinit();
 
+        try t.expectEqual(function_name.len, imported.header.function_name_length);
+        try t.expectEqualStrings(function_name, imported.function_name);
         try t.expectEqual(air.instructions.len, imported.air.instructions.len);
         try t.expectEqual(air.extra.len, imported.air.extra.len);
 
