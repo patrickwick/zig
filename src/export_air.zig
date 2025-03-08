@@ -11,28 +11,24 @@ const Zcu = @import("Zcu.zig");
 
 /// Dumped AIR header with C ABI type for stability.
 pub const AirHeader = extern struct {
-    instruction_count: u64,
+    // TODO: use entry or byte counts?
+    instruction_count: u64, // in entries, not bytes
+    extra_data_count: u64, // in entries, not bytes
 };
 
-/// Export AIR main body.
+/// Export AIR for all instructions. The main body can be filtered from the instruction indexes stored in extra data.
 pub fn exportAir(writer: std.io.AnyWriter, zcu_per_thread: Zcu.PerThread, air: Air, liveness: ?Liveness) void {
-    // TODO: filter out only the main body, not everything? Alternatively add the main indexes from extra_data.
-    // const body = air.getMainBody();
-    // for (body) |instruction_index| exportAirInst(writer, instruction_index, zcu_per_thread, air, liveness);
-
     const header = AirHeader{
         .instruction_count = air.instructions.len,
+        .extra_data_count = air.extra.len,
     };
-
-    const tags = air.instructions.items(.tag);
-    const data = air.instructions.items(.data);
 
     {
         errdefer @panic("exportAir writer failed"); // TODO: handle properly
         try writer.writeStruct(header);
-        try writer.writeAll(@ptrCast(tags));
-        try writer.writeAll(@ptrCast(data));
-        // TODO: dump extra data. It's indexed by Data.arg.
+        try writer.writeAll(@ptrCast(air.instructions.items(.tag)));
+        try writer.writeAll(@ptrCast(air.instructions.items(.data)));
+        try writer.writeAll(@ptrCast(air.extra));
     }
 
     // TODO: dump InternPool: AIR instructions contain indexes to entries in Data.bin_op, Data.ty, etc.
@@ -61,10 +57,19 @@ pub fn exportAirInst(writer: std.io.AnyWriter, instruction_index: Air.Inst.Index
     @panic("exportAirInst is not supported yet");
 }
 
+// TODO: extract AIR types and import function into reduced file that is independent of the rest of the compiler.
+// It's important for an external tools to compile this quickly without the entire Zig compiler as a dependency.
+// => add extern functions to link against this as a library? Then it wouldn't recompile all the time.
 pub const AirImported = struct {
     air: Air,
     /// Instructions owned by the caller that needs to free it using the provided allocator.
     instructions_owned: std.MultiArrayList(Air.Inst),
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *@This()) void {
+        self.instructions_owned.deinit(self.allocator);
+        self.allocator.free(self.air.extra);
+    }
 };
 
 pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImported {
@@ -80,12 +85,19 @@ pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImp
     const data_bytes_read = try reader.readAll(@ptrCast(instructions.items(.data)));
     std.debug.assert(data_bytes_read == header.instruction_count * @sizeOf(Air.Inst.Data));
 
+    const Extra = u32;
+    const extra = try allocator.alloc(Extra, header.extra_data_count);
+    errdefer allocator.free(extra);
+    const extra_bytes_read = try reader.readAll(@ptrCast(extra));
+    std.debug.assert(extra_bytes_read == header.extra_data_count * @sizeOf(Extra));
+
     return .{
         .air = .{
             .instructions = instructions.slice(),
-            .extra = &.{}, // TODO
+            .extra = extra,
         },
         .instructions_owned = instructions,
+        .allocator = allocator,
     };
 }
 
@@ -93,7 +105,7 @@ pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImp
 const t = std.testing;
 
 // Create a test compilation unit for testing without source files. Zcu stores the InternPool which is used in AIR.
-// A Zcu holds a pointer to Compilation, so it cannot be created on its own.
+// Zcu unit holds a pointer to Compilation, so it cannot be created on its own (without null pointer hacks).
 const TestCompilationUnit = struct {
     compilation: *Compilation,
     allocator: std.mem.Allocator,
@@ -253,7 +265,7 @@ test exportAir {
     }
 
     const extra = e: {
-        const extra_max_size = 512;
+        const extra_max_size = 32;
         var extra = [1]u32{0} ** extra_max_size;
         std.debug.assert(instructions.len <= extra_max_size);
 
@@ -273,15 +285,17 @@ test exportAir {
 
     // Export, import and assert data.
     {
-        const buffer_size = 1000;
+        const buffer_size = 1024;
         var buffer = [1]u8{0} ** buffer_size;
         var stream = std.io.FixedBufferStream([]u8){ .buffer = &buffer, .pos = 0 };
         exportAir(stream.writer().any(), zcu_per_thread, air, null);
 
         try stream.seekTo(0);
         var imported = try importAir(allocator, stream.reader().any());
-        defer imported.instructions_owned.deinit(allocator);
+        defer imported.deinit();
+
         try t.expectEqual(air.instructions.len, imported.air.instructions.len);
+        try t.expectEqual(air.extra.len, imported.air.extra.len);
 
         const tags = imported.air.instructions.items(.tag);
         const variants = imported.air.instructions.items(.data);
@@ -290,5 +304,11 @@ test exportAir {
             const DataType = *align(1) const u64;
             try t.expectEqual(@as(DataType, @ptrCast(&expected_variant)).*, @as(DataType, @ptrCast(&variant)).*);
         }
+
+        try t.expectEqualSlices(u32, air.extra, imported.air.extra);
+
+        const main_body_indexes = imported.air.getMainBody();
+        try t.expectEqual(air.instructions.len, main_body_indexes.len);
+        for (0..air.instructions.len, main_body_indexes) |expected_i, actual_i| try t.expectEqual(expected_i, @intFromEnum(actual_i));
     }
 }
