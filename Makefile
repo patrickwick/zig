@@ -1,0 +1,86 @@
+ZIG=zig
+ZIG_LIB_DIR=./lib
+
+all: build
+
+# Most important flags from `zig build --help`:
+# -Dno-lib: skip copying libc and zig std library files to prefix
+# -Dno-bin: skip emitting compiler binary
+# -Ddev=x86_64-linux: x64 backend only for faster compilation
+# -Ddebug-extensions=true: enable --verbose-air and other debug dumps
+
+.PHONY: build
+build:
+	time ${ZIG} build \
+		-Ddebug-extensions=true \
+		-Doptimize=Debug \
+		-Dno-lib \
+		-Duse-llvm=false \
+		-Ddev=x86_64-linux \
+		--zig-lib-dir ${ZIG_LIB_DIR} \
+		--summary all
+
+# ./zig-out/bin/zig build-obj --verbose-air ./test.zig 2&> test.air
+.PHONY: test-unit
+test-unit:
+	time ${ZIG} build test-unit \
+		-Ddebug-extensions=true \
+		-Dno-lib \
+		-Dno-bin \
+		-Duse-llvm=false \
+		-Ddev=x86_64-linux \
+		--zig-lib-dir ${ZIG_LIB_DIR} \
+		--summary all
+
+.PHONY: test-watch
+test-watch:
+	time ${ZIG} build test-unit \
+		-Dno-lib \
+		-Dno-bin \
+		-Duse-llvm=false \
+		-Ddev=x86_64-linux \
+		--zig-lib-dir ${ZIG_LIB_DIR} \
+		--summary all \
+		-fincremental \
+		--watch
+
+.PHONY: test
+test:
+	time ${ZIG} test ./src/export_air.zig \
+		-fno-llvm \
+		--zig-lib-dir ${ZIG_LIB_DIR} \
+		--test-filter "exportAir"
+
+.PHONY: release
+release:
+	time ${ZIG} build \
+		-Ddebug-extensions=true \
+		-Doptimize=ReleaseFast \
+		-Duse-llvm=true \
+		-Ddev=x86_64-linux \
+		--zig-lib-dir ${ZIG_LIB_DIR} \
+		--prefix zig-out-release \
+		--summary all
+
+.PHONY: incremental
+incremental:
+	${ZIG} build \
+		-Ddebug-extensions=true \
+		-Dno-lib \
+		-Dno-bin \
+		-Duse-llvm=false \
+		-Ddev=x86_64-linux \
+		--zig-lib-dir ${ZIG_LIB_DIR} \
+		-fincremental \
+		--watch
+
+.PHONY: incremental-bin
+incremental-bin:
+	${ZIG} build \
+		-Ddebug-extensions=true \
+		-Dno-lib \
+		-Duse-llvm=false \
+		-Ddev=x86_64-linux \
+		--zig-lib-dir ${ZIG_LIB_DIR} \
+		-fincremental \
+		--watch
