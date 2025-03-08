@@ -10,35 +10,57 @@ const Package = @import("Package.zig");
 const Zcu = @import("Zcu.zig");
 
 /// Export AIR main body.
-pub fn exportAir(pt: Zcu.PerThread, air: Air, liveness: ?Liveness) void {
+pub fn exportAir(zcu_per_thread: Zcu.PerThread, air: Air, liveness: ?Liveness) void {
     const body = air.getMainBody();
-    for (body) |inst| exportAirInst(inst, pt, air, liveness);
+    std.log.err("Main body of size {}: {any}", .{ body.len, body }); // FIXME: remove
+    for (body) |instruction_index| exportAirInst(instruction_index, zcu_per_thread, air, liveness);
+
+    // TODO: dump InternPool: AIR instructions contain indexes to entries in Data.bin_op, Data.ty, etc.
+    const intern_pool = zcu_per_thread.zcu.intern_pool;
+    _ = intern_pool;
+
+    // TODO: dump additional data on demand: Data.ty_pl contains a u32 index into additional data
+    // => what data exactly?
+
+    // TODO: dump extra data as well? Used by Data.arg.
+
+    // TODO: dump liveness
+    if (liveness) |l| {
+        _ = l;
+    }
 }
 
-pub fn exportAirInst(inst: Air.Inst.Index, pt: Zcu.PerThread, air: Air, liveness: ?Liveness) void {
-    _ = inst;
-    _ = pt;
+/// Export AIR starting from a specific instruction index.
+pub fn exportAirInst(instruction_index: Air.Inst.Index, zcu_per_thread: Zcu.PerThread, air: Air, liveness: ?Liveness) void {
+    _ = zcu_per_thread;
     _ = liveness;
 
     const tags = air.instructions.items(.tag);
     const data = air.instructions.items(.data);
 
-    for (tags, data) |tag, variant| {
-        std.log.info("{any}: {any}", .{ tag, variant });
-    }
+    const index = @intFromEnum(instruction_index);
+    const tag = tags[index];
+    const variant = data[index];
+
+    // TODO: dump the instructions starting from the index
+    // => no serialization needed, they all have an 8bit tag and 64bit variant
+    std.log.err("Instruction {any}: {any}: {any}", .{ instruction_index, tag, variant }); // FIXME: remove
 }
 
 // Test code here on.
 const t = std.testing;
 
-// Create a test compilation unit for testing without source files. Simulates what happesn in src/main.zig.
+// Create a test compilation unit for testing without source files. Zcu stores the InternPool which is used in AIR.
+// A Zcu holds a pointer to Compilation, so it cannot be created on its own.
 const TestCompilationUnit = struct {
     compilation: *Compilation,
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
     thread_pool: *std.Thread.Pool,
 
-    pub fn init(allocator: std.mem.Allocator) !@This() {
+    pub fn init(
+        allocator: std.mem.Allocator,
+    ) !@This() {
         var arena = std.heap.ArenaAllocator.init(allocator);
         errdefer arena.deinit();
         const arena_allocator = arena.allocator();
@@ -151,17 +173,61 @@ const TestCompilationUnit = struct {
     }
 };
 
+// Export minimal main function:
+// pub fn main() void {}
+//
+// # Begin Function AIR: test.main:
+// # Total AIR+Liveness bytes: 146B
+// # AIR Instructions:         2 (18B)
+// # AIR Extra Data:           4 (16B)
+// # Liveness tomb_bits:       8B
+// # Liveness Extra Data:      0 (0B)
+// # Liveness special table:   0 (0B)
+//   %0!= save_err_return_trace_index()
+//   %1!= ret_safe(@Air.Inst.Ref.void_value)
+// info: Air.Inst.Tag.save_err_return_trace_index
+// info: Air.Inst.Tag.ret_safe
+// # End Function AIR: test.main
 test exportAir {
-    var test_unit = try TestCompilationUnit.init(t.allocator);
+    const allocator = t.allocator;
+    var test_unit = try TestCompilationUnit.init(allocator);
     defer test_unit.deinit();
+    const zcu_per_thread = Zcu.PerThread{ .tid = .main, .zcu = test_unit.compilation.zcu.? };
 
-    const pt = Zcu.PerThread{ .tid = .main, .zcu = test_unit.compilation.zcu.? };
-    const instructions = std.MultiArrayList(Air.Inst){};
+    var instructions = std.MultiArrayList(Air.Inst){};
+    defer instructions.deinit(allocator);
+    {
+        // %0!= save_err_return_trace_index()
+        try instructions.append(allocator, Air.Inst{
+            .tag = .save_err_return_trace_index,
+            .data = .{ .ty_pl = .{ .ty = .void_value, .payload = 0 } }, // TODO: index to what in this case?
+        });
+
+        // %1!= ret_safe(@Air.Inst.Ref.void_value)
+        try instructions.append(allocator, Air.Inst{
+            .tag = .ret_safe,
+            .data = .{ .un_op = .void_value },
+        });
+    }
+
+    const extra = e: {
+        const extra_max_size = 512;
+        var extra = [1]u32{0} ** extra_max_size;
+        std.debug.assert(instructions.len <= extra_max_size);
+
+        // "main_block" points to a length followed by the main body instruction indexes (see Air.getMainBody()).
+        const main_block_extra_index = @intFromEnum(Air.ExtraIndex.main_block);
+        extra[main_block_extra_index] = main_block_extra_index + 1;
+        extra[main_block_extra_index + 1] = @intCast(instructions.len);
+        for (0..instructions.len) |i| extra[main_block_extra_index + 2 + i] = @intCast(i);
+
+        break :e extra;
+    };
 
     const air = Air{
         .instructions = instructions.slice(),
-        .extra = &.{},
+        .extra = &extra,
     };
 
-    exportAir(pt, air, null);
+    exportAir(zcu_per_thread, air, null);
 }
