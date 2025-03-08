@@ -9,11 +9,30 @@ const Liveness = @import("Liveness.zig");
 const Package = @import("Package.zig");
 const Zcu = @import("Zcu.zig");
 
+/// Dumped AIR header with C ABI type for stability.
+pub const AirHeader = extern struct {
+    instruction_count: u64,
+};
+
 /// Export AIR main body.
-pub fn exportAir(zcu_per_thread: Zcu.PerThread, air: Air, liveness: ?Liveness) void {
-    const body = air.getMainBody();
-    std.log.err("Main body of size {}: {any}", .{ body.len, body }); // FIXME: remove
-    for (body) |instruction_index| exportAirInst(instruction_index, zcu_per_thread, air, liveness);
+pub fn exportAir(writer: std.io.AnyWriter, zcu_per_thread: Zcu.PerThread, air: Air, liveness: ?Liveness) void {
+    // TODO: filter out only the main body, not everything? Alternatively add the main indexes from extra_data.
+    // const body = air.getMainBody();
+    // for (body) |instruction_index| exportAirInst(writer, instruction_index, zcu_per_thread, air, liveness);
+
+    const header = AirHeader{
+        .instruction_count = air.instructions.len,
+    };
+
+    const tags = air.instructions.items(.tag);
+    const data = air.instructions.items(.data);
+
+    {
+        errdefer @panic("exportAir writer failed"); // TODO: handle properly
+        try writer.writeStruct(header);
+        try writer.writeAll(@ptrCast(tags));
+        try writer.writeAll(@ptrCast(data));
+    }
 
     // TODO: dump InternPool: AIR instructions contain indexes to entries in Data.bin_op, Data.ty, etc.
     const intern_pool = zcu_per_thread.zcu.intern_pool;
@@ -31,20 +50,14 @@ pub fn exportAir(zcu_per_thread: Zcu.PerThread, air: Air, liveness: ?Liveness) v
 }
 
 /// Export AIR starting from a specific instruction index.
-pub fn exportAirInst(instruction_index: Air.Inst.Index, zcu_per_thread: Zcu.PerThread, air: Air, liveness: ?Liveness) void {
+pub fn exportAirInst(writer: std.io.AnyWriter, instruction_index: Air.Inst.Index, zcu_per_thread: Zcu.PerThread, air: Air, liveness: ?Liveness) void {
+    // TODO: not supported yet - it's unclear how the multi array list would be written incrementally using the writer abstraction.
+    _ = writer;
+    _ = instruction_index;
+    _ = air;
     _ = zcu_per_thread;
     _ = liveness;
-
-    const tags = air.instructions.items(.tag);
-    const data = air.instructions.items(.data);
-
-    const index = @intFromEnum(instruction_index);
-    const tag = tags[index];
-    const variant = data[index];
-
-    // TODO: dump the instructions starting from the index
-    // => no serialization needed, they all have an 8bit tag and 64bit variant
-    std.log.err("Instruction {any}: {any}: {any}", .{ instruction_index, tag, variant }); // FIXME: remove
+    @panic("exportAirInst is not supported yet");
 }
 
 // Test code here on.
@@ -229,5 +242,17 @@ test exportAir {
         .extra = &extra,
     };
 
-    exportAir(zcu_per_thread, air, null);
+    const max_export_buffer_size = 1000;
+    var export_buffer = [1]u8{0} ** max_export_buffer_size;
+    var export_buffer_stream = std.io.FixedBufferStream([]u8){ .buffer = &export_buffer, .pos = 0 };
+    exportAir(export_buffer_stream.writer().any(), zcu_per_thread, air, null);
+
+    // Decode and assert exported data.
+    // TODO: extract decode/import function.
+    {
+        try export_buffer_stream.seekTo(0);
+        const reader = export_buffer_stream.reader();
+        const header = try reader.readStruct(AirHeader);
+        try t.expectEqual(instructions.len, header.instruction_count);
+    }
 }
