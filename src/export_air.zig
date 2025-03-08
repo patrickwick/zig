@@ -32,6 +32,7 @@ pub fn exportAir(writer: std.io.AnyWriter, zcu_per_thread: Zcu.PerThread, air: A
         try writer.writeStruct(header);
         try writer.writeAll(@ptrCast(tags));
         try writer.writeAll(@ptrCast(data));
+        // TODO: dump extra data. It's indexed by Data.arg.
     }
 
     // TODO: dump InternPool: AIR instructions contain indexes to entries in Data.bin_op, Data.ty, etc.
@@ -41,8 +42,6 @@ pub fn exportAir(writer: std.io.AnyWriter, zcu_per_thread: Zcu.PerThread, air: A
     // TODO: dump additional data on demand: Data.ty_pl contains a u32 index into additional data
     // => what data exactly?
 
-    // TODO: dump extra data as well? Used by Data.arg.
-
     // TODO: dump liveness
     if (liveness) |l| {
         _ = l;
@@ -51,13 +50,48 @@ pub fn exportAir(writer: std.io.AnyWriter, zcu_per_thread: Zcu.PerThread, air: A
 
 /// Export AIR starting from a specific instruction index.
 pub fn exportAirInst(writer: std.io.AnyWriter, instruction_index: Air.Inst.Index, zcu_per_thread: Zcu.PerThread, air: Air, liveness: ?Liveness) void {
-    // TODO: not supported yet - it's unclear how the multi array list would be written incrementally using the writer abstraction.
+    // TODO: not supported yet.
+    // It's unclear how the multi array list would be written incrementally using the writer abstraction.
+    // Also indexes stored in e.g. `Data.arg` would need to be adjusted accordingly.
     _ = writer;
     _ = instruction_index;
     _ = air;
     _ = zcu_per_thread;
     _ = liveness;
     @panic("exportAirInst is not supported yet");
+}
+
+pub const AirImported = struct {
+    air: Air,
+    /// Instructions owned by the caller that needs to free it using the provided allocator.
+    instructions_owned: std.MultiArrayList(Air.Inst),
+};
+
+pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImported {
+    const header = try reader.readStruct(AirHeader);
+
+    const tags = try allocator.alloc(Air.Inst.Tag, header.instruction_count);
+    defer allocator.free(tags);
+    _ = try reader.readAll(@ptrCast(tags));
+
+    const data = try allocator.alloc(Air.Inst.Data, header.instruction_count);
+    defer allocator.free(data);
+    _ = try reader.readAll(@ptrCast(data));
+
+    // TODO: can multi array list be constructed directly without the additional copy?
+    // => resize then read directly into .items(.tag)
+    var instructions = std.MultiArrayList(Air.Inst){};
+    errdefer instructions.deinit(allocator);
+    try instructions.ensureTotalCapacity(allocator, header.instruction_count);
+    for (tags, data) |tag, variant| instructions.appendAssumeCapacity(.{ .tag = tag, .data = variant });
+
+    return .{
+        .air = .{
+            .instructions = instructions.slice(),
+            .extra = &.{}, // TODO
+        },
+        .instructions_owned = instructions,
+    };
 }
 
 // Test code here on.
@@ -242,30 +276,21 @@ test exportAir {
         .extra = &extra,
     };
 
-    const max_export_buffer_size = 1000;
-    var export_buffer = [1]u8{0} ** max_export_buffer_size;
-    var export_buffer_stream = std.io.FixedBufferStream([]u8){ .buffer = &export_buffer, .pos = 0 };
-    exportAir(export_buffer_stream.writer().any(), zcu_per_thread, air, null);
-
-    // Decode and assert exported data.
-    // TODO: extract decode/import function.
+    // Export, import and assert data.
     {
-        var offset: usize = 0;
-        const header: *align(1) const AirHeader = @alignCast(@ptrCast(&export_buffer[offset]));
-        offset += @sizeOf(AirHeader);
-        try t.expectEqual(instructions.len, header.instruction_count);
+        const buffer_size = 1000;
+        var buffer = [1]u8{0} ** buffer_size;
+        var stream = std.io.FixedBufferStream([]u8){ .buffer = &buffer, .pos = 0 };
+        exportAir(stream.writer().any(), zcu_per_thread, air, null);
 
-        const tags_pointer: [*]align(1) const Air.Inst.Tag = @alignCast(@ptrCast(&export_buffer[offset]));
-        const tags = tags_pointer[0..header.instruction_count];
-        offset += header.instruction_count * @sizeOf(Air.Inst.Tag);
+        try stream.seekTo(0);
+        var imported = try importAir(allocator, stream.reader().any());
+        defer imported.instructions_owned.deinit(allocator);
+        try t.expectEqual(air.instructions.len, imported.air.instructions.len);
 
-        const variants_pointer: [*]align(1) const Air.Inst.Data = @alignCast(@ptrCast(&export_buffer[offset]));
-        const variants = variants_pointer[0..header.instruction_count];
-        offset += header.instruction_count * @sizeOf(Air.Inst.Data);
-
-        // try t.expectEqualSlices(Air.Inst.Tag, instructions.items(.tag), tags);
-        // try t.expectEqualSlices(u8, std.mem.sliceAsBytes(instructions.items(.data)), std.mem.sliceAsBytes(variants));
-        for (tags, variants, instructions.items(.tag), instructions.items(.data)) |tag, variant, expected_tag, expected_variant| {
+        const tags = imported.air.instructions.items(.tag);
+        const variants = imported.air.instructions.items(.data);
+        for (tags, variants, air.instructions.items(.tag), air.instructions.items(.data)) |tag, variant, expected_tag, expected_variant| {
             try t.expectEqual(expected_tag, tag);
             const DataType = *align(1) const u64;
             try t.expectEqual(@as(DataType, @ptrCast(&expected_variant)).*, @as(DataType, @ptrCast(&variant)).*);
