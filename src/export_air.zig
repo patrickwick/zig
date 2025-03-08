@@ -19,8 +19,8 @@ pub const AirHeader = extern struct {
 /// Export AIR for all instructions. The main body can be filtered from the instruction indexes stored in extra data.
 pub fn exportAir(writer: std.io.AnyWriter, zcu_per_thread: Zcu.PerThread, air: Air, liveness: ?Liveness) void {
     const header = AirHeader{
-        .instruction_count = air.instructions.len,
-        .extra_data_count = air.extra.len,
+        .instruction_count = @intCast(air.instructions.len),
+        .extra_data_count = @intCast(air.extra.len),
     };
 
     {

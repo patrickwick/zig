@@ -1665,9 +1665,10 @@ pub fn linkerUpdateFunc(pt: Zcu.PerThread, func_index: InternPool.Index, air: Ai
     defer liveness.deinit(gpa);
 
     if (build_options.enable_debug_extensions and comp.verbose_air) {
-        std.debug.print("# Begin Function AIR: {}:\n", .{nav.fqn.fmt(ip)});
-        @import("../print_air.zig").dump(pt, air, liveness);
-        std.debug.print("# End Function AIR: {}\n\n", .{nav.fqn.fmt(ip)});
+        const function_name = try std.fmt.allocPrint(gpa, "{}", .{nav.fqn.fmt(ip)});
+        std.debug.print("# Begin Function AIR: {s}:\n", .{function_name});
+        @import("../print_air.zig").dump(pt, air, liveness, function_name);
+        std.debug.print("# End Function AIR: {s}\n\n", .{function_name});
     }
 
     if (std.debug.runtime_safety) {

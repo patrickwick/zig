@@ -71,14 +71,33 @@ pub fn writeInst(
     writer.writeInst(stream, inst) catch return;
 }
 
-pub fn dump(pt: Zcu.PerThread, air: Air, liveness: ?Liveness) void {
-    write(std.io.getStdErr().writer(), pt, air, liveness);
-    export_air.exportAir(std.io.getStdErr().writer(), pt, air, liveness);
+var air_export_counter: usize = 0; // FIXME: remove - concatenate in a single file, not one per function.
+
+pub fn dump(pt: Zcu.PerThread, air: Air, liveness: ?Liveness, function_name: []const u8) void {
+    const writer = std.io.getStdErr().writer();
+    write(writer, pt, air, liveness);
+
+    const file_index = air_export_counter;
+    air_export_counter += 1;
+
+    var path_buffer: [512]u8 = undefined;
+    const file_path = std.fmt.bufPrint(&path_buffer, "air_export_{s}.bair", .{function_name}) catch {
+        std.log.err("failed exporting binary AIR #{d}", .{file_index});
+        return;
+    };
+
+    writer.print("# Exporting binary AIR to: {s}\n", .{file_path}) catch {};
+    const file = std.fs.cwd().createFile(file_path, .{}) catch {
+        std.log.err("failed exporting binary AIR to: {s}", .{file_path});
+        return;
+    };
+    defer file.close();
+    export_air.exportAir(file.writer().any(), pt, air, liveness);
 }
 
 pub fn dumpInst(inst: Air.Inst.Index, pt: Zcu.PerThread, air: Air, liveness: ?Liveness) void {
     writeInst(std.io.getStdErr().writer(), inst, pt, air, liveness);
-    export_air.exportAirInst(std.io.getStdErr().writer(), inst, pt, air, liveness);
+    export_air.exportAirInst(std.io.getStdErr().writer().any(), inst, pt, air, liveness);
 }
 
 const Writer = struct {
