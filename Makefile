@@ -89,3 +89,14 @@ incremental-bin:
 .PHONY: xxd
 xxd:
 	xxd -R always ./air_export.bair | less -R
+
+.PHONY: analyze
+analyze:
+	$(shell cd ./analyzer; zig build run)
+
+.PHONY: test-integration
+test-integration:
+	${MAKE} test-unit
+	${MAKE} build
+	./zig-out/bin/zig build-obj --verbose-air ./test.zig
+	${MAKE} analyze

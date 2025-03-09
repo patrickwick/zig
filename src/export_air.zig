@@ -369,5 +369,6 @@ test exportAir {
     }
 }
 
-// TODO(pwr): test that exporting / importing multiple functions in a continous stream works.
-// test "Pack AIR functions into one buffer" {}
+test "Pack AIR functions into one buffer" {
+    // TODO(pwr): test that exporting / importing multiple functions in a continous stream works.
+}
