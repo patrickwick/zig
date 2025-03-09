@@ -42,18 +42,64 @@ pub fn main() !void {
         return error.TargetFunctionNotFound;
     };
 
+    const main_body_indexes = air_import.air.getMainBody();
     std.log.info(
-        \\AIR \"{s}\":
+        \\AIR function "{s}":
         \\main body indexes: {any}
         \\{any}
-    , .{ air_import.function_name, air_import.air.getMainBody(), air_import.air });
+    , .{ air_import.function_name, main_body_indexes, air_import.air });
 
     // Detect division by zero as a simple PoC using symbolic execution.
     {
-        // TODO(pwr)
-    }
+        // TODO(pwr): add store for variables.
+        // TODO(pwr): how can identifiers be traced back? Using only the `dbg_x` instructions?
+        // * Is any additional information required or does the fully qualified name, source code and AIR suffice?
 
-    // TODO(pwr): how can source locations be traced back? Using the `dbg_stmt` instructions?
-    // * What is the meaning of the two integers?
-    // * Is any additional information required or does the fully qualified name and AIR dbg suffice?
+        const tags = air_import.instructions_owned.items(.tag);
+        const data = air_import.instructions_owned.items(.data);
+        for (main_body_indexes) |instruction_index| {
+            const i = @intFromEnum(instruction_index);
+            const tag = tags[i];
+            const variant = data[i];
+
+            // TODO(pwr): dereference the `Air.Inst.Ref` from intern pool => not exported yet.
+            // NOTE: see Air.Inst.Tag for documentation on the mapping.
+            switch (tag) {
+                .dbg_stmt => {
+                    const debug_statement = variant.dbg_stmt;
+                    std.log.info("{} {}: {}", .{ instruction_index, tag, debug_statement });
+                },
+                .dbg_var_ptr => {
+                    const payload_operand = variant.pl_op;
+                    std.log.info("{} {}: {}", .{ instruction_index, tag, payload_operand });
+                },
+                .dbg_var_val => {
+                    const payload_operand = variant.pl_op;
+                    std.log.info("{} {}: {}", .{ instruction_index, tag, payload_operand });
+                },
+                .store, .store_safe => {
+                    const binary_operation = variant.bin_op;
+                    std.log.info("{} {}: {}", .{ instruction_index, tag, binary_operation });
+                },
+                .load => {
+                    const type_operand = variant.ty_op;
+                    std.log.info("{} {}: {}", .{ instruction_index, tag, type_operand });
+                },
+                .mul_with_overflow => {
+                    const type_payload = variant.ty_pl;
+                    std.log.info("{} {}: {}", .{ instruction_index, tag, type_payload });
+                },
+                .sub_with_overflow => {
+                    const type_payload = variant.ty_pl;
+                    std.log.info("{} {}: {}", .{ instruction_index, tag, type_payload });
+                },
+                .div_trunc => {
+                    const binary_operation = variant.bin_op;
+                    std.log.info("{} {}: {}", .{ instruction_index, tag, binary_operation });
+                },
+                // TODO(pwr): implement all instructions.
+                else => std.log.info("{} {}", .{ instruction_index, tag }),
+            }
+        }
+    }
 }

@@ -3,7 +3,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const Air = @import("Air.zig");
+pub const Air = @import("Air.zig");
 const Compilation = @import("Compilation.zig");
 const Liveness = @import("Liveness.zig");
 const Package = @import("Package.zig");
@@ -59,6 +59,7 @@ pub fn exportAir(writer: std.io.AnyWriter, zcu_per_thread: Zcu.PerThread, air: A
     try alignWriter(writer, air.extra.len * @sizeOf(@TypeOf(air.extra[0])), AirHeader.TARGET_ALIGNMENT);
 
     // TODO: dump InternPool: AIR instructions contain indexes to entries in Data.bin_op, Data.ty, etc.
+    // Store the entire pool or iterate the instructions to store dereferenced values? There are helpers like `Air.value` for it.
     const intern_pool = zcu_per_thread.zcu.intern_pool;
     _ = intern_pool;
 

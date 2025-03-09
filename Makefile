@@ -1,7 +1,8 @@
+# Temporary convenience Makefile to create named targets for a combination of Zig and other tools.
 ZIG=zig
 ZIG_LIB_DIR=./lib
 
-all: build
+all: test-integration
 
 # Most important flags from `zig build --help`:
 # -Dno-lib: skip copying libc and zig std library files to prefix
