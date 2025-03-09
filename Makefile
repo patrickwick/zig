@@ -88,7 +88,7 @@ incremental-bin:
 # ./zig-out/bin/zig build-obj --verbose-air ./test.zig 2&> test.air
 .PHONY: xxd
 xxd:
-	xxd -R always ./air_export.bair | less -R
+	xxd -R always ./air_export.air.bin | less -R
 
 .PHONY: analyze
 analyze:
@@ -98,5 +98,5 @@ analyze:
 test-integration:
 	${MAKE} test-unit
 	${MAKE} build
-	./zig-out/bin/zig build-obj --verbose-air ./test.zig
+	./zig-out/bin/zig build-obj --verbose-air ./analyzer/test.zig
 	${MAKE} analyze

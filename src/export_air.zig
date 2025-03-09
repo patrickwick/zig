@@ -109,6 +109,7 @@ pub const AirImported = struct {
     }
 };
 
+// TODO: return optional to indicate end of stream without an error.
 pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImported {
     const header = try reader.readStruct(AirHeader);
 
