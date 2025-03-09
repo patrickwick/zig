@@ -5,8 +5,10 @@ const builtin = @import("builtin");
 
 pub const Air = @import("Air.zig");
 const Compilation = @import("Compilation.zig");
+const InternPool = @import("InternPool.zig");
 const Liveness = @import("Liveness.zig");
 const Package = @import("Package.zig");
+const Value = @import("Value.zig");
 const Zcu = @import("Zcu.zig");
 
 pub const DEFAULT_BINARY_AIR_PATH = "air_export.air.bin";
@@ -60,8 +62,17 @@ pub fn exportAir(writer: std.io.AnyWriter, zcu_per_thread: Zcu.PerThread, air: A
 
     // TODO: dump InternPool: AIR instructions contain indexes to entries in Data.bin_op, Data.ty, etc.
     // Store the entire pool or iterate the instructions to store dereferenced values? There are helpers like `Air.value` for it.
-    const intern_pool = zcu_per_thread.zcu.intern_pool;
-    _ = intern_pool;
+    var intern_pool = zcu_per_thread.zcu.intern_pool;
+    const ip_local = intern_pool.getLocal(zcu_per_thread.tid);
+    const ip_shared = intern_pool.getLocalShared(zcu_per_thread.tid);
+    _ = ip_local;
+    _ = ip_shared;
+    // std.log.err("Local: {any}", .{ip_local});
+    // std.log.err("Local shared: {any}", .{ip_shared});
+
+    const value = (try air.value(.one, zcu_per_thread)).?;
+    _ = value;
+    // std.log.err("value: {any}\n{any}", .{ value.fmtDebug(), value.fmtValue(zcu_per_thread) });
 
     // TODO: dump additional data on demand: Data.ty_pl contains a u32 index into additional data
     // => what data exactly?
@@ -334,39 +345,63 @@ test exportAir {
     };
 
     // Export, import and assert data.
+    const buffer_size = 1024;
+    var buffer = [1]u8{0} ** buffer_size;
+    var stream = std.io.FixedBufferStream([]u8){ .buffer = &buffer, .pos = 0 };
+    const liveness = null;
+    const function_name = "test.main";
+    exportAir(stream.writer().any(), zcu_per_thread, air, liveness, function_name);
+    const total_size_bytes = try stream.getPos();
+
+    try stream.seekTo(0);
+    var imported = try importAir(allocator, stream.reader().any());
+    defer imported.deinit();
+
+    try t.expectEqual(AirHeader.MAGIC, imported.header.magic);
+    try t.expectEqual(total_size_bytes, imported.header.total_size_bytes);
+    try t.expectEqual(function_name.len, imported.header.function_name_length);
+    try t.expectEqualStrings(function_name, imported.function_name);
+    try t.expectEqual(air.instructions.len, imported.air.instructions.len);
+    try t.expectEqual(air.extra.len, imported.air.extra.len);
+
+    const tags = imported.air.instructions.items(.tag);
+    const variants = imported.air.instructions.items(.data);
+    for (tags, variants, air.instructions.items(.tag), air.instructions.items(.data)) |tag, variant, expected_tag, expected_variant| {
+        try t.expectEqual(expected_tag, tag);
+        const DataType = *align(1) const u64;
+        try t.expectEqual(@as(DataType, @ptrCast(&expected_variant)).*, @as(DataType, @ptrCast(&variant)).*);
+    }
+
+    try t.expectEqualSlices(u32, air.extra, imported.air.extra);
+
+    const main_body_indexes = imported.air.getMainBody();
+    try t.expectEqual(air.instructions.len, main_body_indexes.len);
+    for (0..air.instructions.len, main_body_indexes) |expected_i, actual_i| try t.expectEqual(expected_i, @intFromEnum(actual_i));
+
+    // Assert that values that rely on the `InternPool` can be recustructed from `Air.Inst.Ref` references.
     {
-        const buffer_size = 1024;
-        var buffer = [1]u8{0} ** buffer_size;
-        var stream = std.io.FixedBufferStream([]u8){ .buffer = &buffer, .pos = 0 };
-        const liveness = null;
-        const function_name = "test.main";
-        exportAir(stream.writer().any(), zcu_per_thread, air, liveness, function_name);
-        const total_size_bytes = try stream.getPos();
+        const ref = Air.Inst.Ref.one;
 
-        try stream.seekTo(0);
-        var imported = try importAir(allocator, stream.reader().any());
-        defer imported.deinit();
+        // TODO: Reconstruct inside import function.
+        var intern_pool: InternPool = .empty;
+        const thread_count = 1;
+        try intern_pool.init(allocator, thread_count);
+        defer intern_pool.deinit(allocator);
 
-        try t.expectEqual(AirHeader.MAGIC, imported.header.magic);
-        try t.expectEqual(total_size_bytes, imported.header.total_size_bytes);
-        try t.expectEqual(function_name.len, imported.header.function_name_length);
-        try t.expectEqualStrings(function_name, imported.function_name);
-        try t.expectEqual(air.instructions.len, imported.air.instructions.len);
-        try t.expectEqual(air.extra.len, imported.air.extra.len);
+        // TODO: try to find root cause of the Value and Zcu.PerThread dependency.
+        // => can those be separated for our specific use case?
+        // `Air.value` is inlined here and expanded:
+        const value = value: {
+            if (ref.toInterned()) |ip_index| break :value Value.fromInterned(ip_index);
 
-        const tags = imported.air.instructions.items(.tag);
-        const variants = imported.air.instructions.items(.data);
-        for (tags, variants, air.instructions.items(.tag), air.instructions.items(.data)) |tag, variant, expected_tag, expected_variant| {
-            try t.expectEqual(expected_tag, tag);
-            const DataType = *align(1) const u64;
-            try t.expectEqual(@as(DataType, @ptrCast(&expected_variant)).*, @as(DataType, @ptrCast(&variant)).*);
-        }
+            const index = ref.toIndex().?; // Can be unwrapped due to the above check.
+            const type_value = air.typeOfIndex(index, &intern_pool);
+            const value = try type_value.onePossibleValue(zcu_per_thread);
+            break :value value;
+        };
 
-        try t.expectEqualSlices(u32, air.extra, imported.air.extra);
-
-        const main_body_indexes = imported.air.getMainBody();
-        try t.expectEqual(air.instructions.len, main_body_indexes.len);
-        for (0..air.instructions.len, main_body_indexes) |expected_i, actual_i| try t.expectEqual(expected_i, @intFromEnum(actual_i));
+        const v = value.?;
+        std.log.err("value: {any} = {any}", .{ v.fmtDebug(), v.fmtValue(zcu_per_thread) });
     }
 }
 
@@ -412,47 +447,45 @@ test "Pack AIR functions into one buffer" {
     };
 
     // Test that exporting / importing multiple functions in a continuous stream works.
-    {
-        const buffer_size = 1024;
-        var buffer = [1]u8{0} ** buffer_size;
-        var stream = std.io.FixedBufferStream([]u8){ .buffer = &buffer, .pos = 0 };
-        const liveness = null;
-        const function_name = "test.main";
-        const writer = stream.writer().any();
+    const buffer_size = 1024;
+    var buffer = [1]u8{0} ** buffer_size;
+    var stream = std.io.FixedBufferStream([]u8){ .buffer = &buffer, .pos = 0 };
+    const liveness = null;
+    const function_name = "test.main";
+    const writer = stream.writer().any();
 
-        const iterations = 3;
+    const iterations = 3;
 
-        // Export without resetting the writer position.
-        for (0..iterations) |_| exportAir(writer, zcu_per_thread, air, liveness, function_name);
-        const total_size_bytes = try stream.getPos();
+    // Export without resetting the writer position.
+    for (0..iterations) |_| exportAir(writer, zcu_per_thread, air, liveness, function_name);
+    const total_size_bytes = try stream.getPos();
 
-        try stream.seekTo(0);
-        for (0..iterations) |_| {
-            var imported = try importAir(allocator, stream.reader().any());
-            defer imported.deinit();
+    try stream.seekTo(0);
+    for (0..iterations) |_| {
+        var imported = try importAir(allocator, stream.reader().any());
+        defer imported.deinit();
 
-            try t.expectEqual(AirHeader.MAGIC, imported.header.magic);
-            try t.expectEqual(function_name.len, imported.header.function_name_length);
-            try t.expectEqualStrings(function_name, imported.function_name);
-            try t.expectEqual(air.instructions.len, imported.air.instructions.len);
-            try t.expectEqual(air.extra.len, imported.air.extra.len);
+        try t.expectEqual(AirHeader.MAGIC, imported.header.magic);
+        try t.expectEqual(function_name.len, imported.header.function_name_length);
+        try t.expectEqualStrings(function_name, imported.function_name);
+        try t.expectEqual(air.instructions.len, imported.air.instructions.len);
+        try t.expectEqual(air.extra.len, imported.air.extra.len);
 
-            const tags = imported.air.instructions.items(.tag);
-            const variants = imported.air.instructions.items(.data);
-            for (tags, variants, air.instructions.items(.tag), air.instructions.items(.data)) |tag, variant, expected_tag, expected_variant| {
-                try t.expectEqual(expected_tag, tag);
-                const DataType = *align(1) const u64;
-                try t.expectEqual(@as(DataType, @ptrCast(&expected_variant)).*, @as(DataType, @ptrCast(&variant)).*);
-            }
-
-            try t.expectEqualSlices(u32, air.extra, imported.air.extra);
-
-            const main_body_indexes = imported.air.getMainBody();
-            try t.expectEqual(air.instructions.len, main_body_indexes.len);
-            for (0..air.instructions.len, main_body_indexes) |expected_i, actual_i| try t.expectEqual(expected_i, @intFromEnum(actual_i));
+        const tags = imported.air.instructions.items(.tag);
+        const variants = imported.air.instructions.items(.data);
+        for (tags, variants, air.instructions.items(.tag), air.instructions.items(.data)) |tag, variant, expected_tag, expected_variant| {
+            try t.expectEqual(expected_tag, tag);
+            const DataType = *align(1) const u64;
+            try t.expectEqual(@as(DataType, @ptrCast(&expected_variant)).*, @as(DataType, @ptrCast(&variant)).*);
         }
 
-        const total_size_bytes_read = try stream.getPos();
-        try t.expectEqual(total_size_bytes, total_size_bytes_read);
+        try t.expectEqualSlices(u32, air.extra, imported.air.extra);
+
+        const main_body_indexes = imported.air.getMainBody();
+        try t.expectEqual(air.instructions.len, main_body_indexes.len);
+        for (0..air.instructions.len, main_body_indexes) |expected_i, actual_i| try t.expectEqual(expected_i, @intFromEnum(actual_i));
     }
+
+    const total_size_bytes_read = try stream.getPos();
+    try t.expectEqual(total_size_bytes, total_size_bytes_read);
 }
