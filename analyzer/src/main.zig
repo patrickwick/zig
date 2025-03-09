@@ -22,7 +22,7 @@ pub fn main() !void {
     defer arena.deinit();
     const arena_allocator = arena.allocator();
 
-    const air_file_path = "../air_export.bair";
+    const air_file_path = "../" ++ air.DEFAULT_BINARY_AIR_PATH;
     const air_file = try std.fs.cwd().openFile(air_file_path, .{});
     defer air_file.close();
 

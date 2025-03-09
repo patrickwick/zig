@@ -9,6 +9,8 @@ const Liveness = @import("Liveness.zig");
 const Package = @import("Package.zig");
 const Zcu = @import("Zcu.zig");
 
+pub const DEFAULT_BINARY_AIR_PATH = "air_export.air.bin";
+
 /// Dumped AIR header with C ABI type for stability.
 pub const AirHeader = extern struct {
     /// Each field is aligned.
@@ -92,9 +94,6 @@ fn alignReader(reader: anytype, size: usize, comptime target_alignment: usize) !
     try reader.skipBytes(aligned_length - size, .{});
 }
 
-// TODO: extract AIR types and import function into reduced file that is independent of the rest of the compiler.
-// It's important for an external tools to compile this quickly without the entire Zig compiler as a dependency.
-// => add extern functions to link against this as a library? Then it wouldn't recompile all the time.
 pub const AirImported = struct {
     header: AirHeader,
     function_name: []const u8,

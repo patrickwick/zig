@@ -79,14 +79,11 @@ pub fn dump(pt: Zcu.PerThread, air: Air, liveness: ?Liveness, function_name: []c
 var air_export_counter: usize = 0;
 
 fn dumpBinaryAir(pt: Zcu.PerThread, air: Air, liveness: ?Liveness, function_name: []const u8) !void {
-    const file_path = "air_export.bair";
-    // std.io.getStdErr().writer().print("# Exporting binary AIR to: {s}\n", .{file_path}) catch {}; // FIXME(pwr): reenable.
-
-    // Clear on first write, then append.
+    // Clear on first write, then append to support several functions in a single file.
     const truncate = (air_export_counter == 0);
     air_export_counter += 1;
 
-    const file = try std.fs.cwd().createFile(file_path, .{ .truncate = truncate });
+    const file = try std.fs.cwd().createFile(export_air.DEFAULT_BINARY_AIR_PATH, .{ .truncate = truncate });
     defer file.close();
     try file.seekFromEnd(0);
 
