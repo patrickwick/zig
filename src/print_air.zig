@@ -72,7 +72,7 @@ pub fn writeInst(
 }
 
 pub fn dump(pt: Zcu.PerThread, air: Air, liveness: ?Liveness, function_name: []const u8) void {
-    write(std.io.getStdErr().writer(), pt, air, liveness);
+    // write(std.io.getStdErr().writer(), pt, air, liveness); // FIXME(pwr): reenable.
     dumpBinaryAir(pt, air, liveness, function_name) catch std.log.err("failed exporting binary AIR data for function: {s}", .{function_name});
 }
 
@@ -80,7 +80,7 @@ var air_export_counter: usize = 0;
 
 fn dumpBinaryAir(pt: Zcu.PerThread, air: Air, liveness: ?Liveness, function_name: []const u8) !void {
     const file_path = "air_export.bair";
-    std.io.getStdErr().writer().print("# Exporting binary AIR to: {s}\n", .{file_path}) catch {};
+    // std.io.getStdErr().writer().print("# Exporting binary AIR to: {s}\n", .{file_path}) catch {}; // FIXME(pwr): reenable.
 
     // Clear on first write, then append.
     const truncate = (air_export_counter == 0);

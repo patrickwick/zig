@@ -368,3 +368,6 @@ test exportAir {
         for (0..air.instructions.len, main_body_indexes) |expected_i, actual_i| try t.expectEqual(expected_i, @intFromEnum(actual_i));
     }
 }
+
+// TODO(pwr): test that exporting / importing multiple functions in a continous stream works.
+// test "Pack AIR functions into one buffer" {}

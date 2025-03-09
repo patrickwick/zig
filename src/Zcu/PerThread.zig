@@ -1666,9 +1666,9 @@ pub fn linkerUpdateFunc(pt: Zcu.PerThread, func_index: InternPool.Index, air: Ai
 
     if (build_options.enable_debug_extensions and comp.verbose_air) {
         const function_name = nav.fqn.toSlice(&zcu.intern_pool);
-        std.debug.print("# Begin Function AIR: {s}:\n", .{function_name});
+        // std.debug.print("# Begin Function AIR: {s}:\n", .{function_name}); // FIXME(pwr): reenable.
         @import("../print_air.zig").dump(pt, air, liveness, function_name);
-        std.debug.print("# End Function AIR: {s}\n\n", .{function_name});
+        // std.debug.print("# End Function AIR: {s}\n\n", .{function_name}); // FIXME(pwr): reenable.
     }
 
     if (std.debug.runtime_safety) {
