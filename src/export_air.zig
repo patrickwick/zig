@@ -370,5 +370,88 @@ test exportAir {
 }
 
 test "Pack AIR functions into one buffer" {
-    // TODO(pwr): test that exporting / importing multiple functions in a continous stream works.
+    const allocator = t.allocator;
+    var test_unit = try TestCompilationUnit.init(allocator);
+    defer test_unit.deinit();
+    const zcu_per_thread = Zcu.PerThread{ .tid = .main, .zcu = test_unit.compilation.zcu.? };
+
+    var instructions = std.MultiArrayList(Air.Inst){};
+    defer instructions.deinit(allocator);
+    {
+        // %0!= save_err_return_trace_index()
+        try instructions.append(allocator, Air.Inst{
+            .tag = .save_err_return_trace_index,
+            .data = .{ .ty_pl = .{ .ty = .void_value, .payload = 0 } }, // TODO: index to what in this case?
+        });
+
+        // %1!= ret_safe(@Air.Inst.Ref.void_value)
+        try instructions.append(allocator, Air.Inst{
+            .tag = .ret_safe,
+            .data = .{ .un_op = .void_value },
+        });
+    }
+
+    const extra = e: {
+        const extra_max_size = 32;
+        var extra = [1]u32{0} ** extra_max_size;
+        std.debug.assert(instructions.len <= extra_max_size);
+
+        // "main_block" points to a length followed by the main body instruction indexes (see Air.getMainBody()).
+        const main_block_extra_index = @intFromEnum(Air.ExtraIndex.main_block);
+        extra[main_block_extra_index] = main_block_extra_index + 1;
+        extra[main_block_extra_index + 1] = @intCast(instructions.len);
+        for (0..instructions.len) |i| extra[main_block_extra_index + 2 + i] = @intCast(i);
+
+        break :e extra;
+    };
+
+    const air = Air{
+        .instructions = instructions.slice(),
+        .extra = &extra,
+    };
+
+    // Test that exporting / importing multiple functions in a continuous stream works.
+    {
+        const buffer_size = 1024;
+        var buffer = [1]u8{0} ** buffer_size;
+        var stream = std.io.FixedBufferStream([]u8){ .buffer = &buffer, .pos = 0 };
+        const liveness = null;
+        const function_name = "test.main";
+        const writer = stream.writer().any();
+
+        const iterations = 3;
+
+        // Export without resetting the writer position.
+        for (0..iterations) |_| exportAir(writer, zcu_per_thread, air, liveness, function_name);
+        const total_size_bytes = try stream.getPos();
+
+        try stream.seekTo(0);
+        for (0..iterations) |_| {
+            var imported = try importAir(allocator, stream.reader().any());
+            defer imported.deinit();
+
+            try t.expectEqual(AirHeader.MAGIC, imported.header.magic);
+            try t.expectEqual(function_name.len, imported.header.function_name_length);
+            try t.expectEqualStrings(function_name, imported.function_name);
+            try t.expectEqual(air.instructions.len, imported.air.instructions.len);
+            try t.expectEqual(air.extra.len, imported.air.extra.len);
+
+            const tags = imported.air.instructions.items(.tag);
+            const variants = imported.air.instructions.items(.data);
+            for (tags, variants, air.instructions.items(.tag), air.instructions.items(.data)) |tag, variant, expected_tag, expected_variant| {
+                try t.expectEqual(expected_tag, tag);
+                const DataType = *align(1) const u64;
+                try t.expectEqual(@as(DataType, @ptrCast(&expected_variant)).*, @as(DataType, @ptrCast(&variant)).*);
+            }
+
+            try t.expectEqualSlices(u32, air.extra, imported.air.extra);
+
+            const main_body_indexes = imported.air.getMainBody();
+            try t.expectEqual(air.instructions.len, main_body_indexes.len);
+            for (0..air.instructions.len, main_body_indexes) |expected_i, actual_i| try t.expectEqual(expected_i, @intFromEnum(actual_i));
+        }
+
+        const total_size_bytes_read = try stream.getPos();
+        try t.expectEqual(total_size_bytes, total_size_bytes_read);
+    }
 }
