@@ -11,32 +11,50 @@ const Zcu = @import("Zcu.zig");
 
 /// Dumped AIR header with C ABI type for stability.
 pub const AirHeader = extern struct {
-    /// Total size of the function AIR data and function name.
-    byte_size: usize,
-    function_name_length: usize,
+    /// Each field is aligned.
+    pub const TARGET_ALIGNMENT = 8;
+    pub const MAGIC = 0x21504d5544524941; // "AIRDUMP!" in hex
+
+    magic: u64 = MAGIC,
+    total_size_bytes: u64,
+    function_name_length: u64, // in bytes
     instruction_count: u64, // in entries, not bytes
     extra_data_count: u64, // in entries, not bytes
+
+    pub fn init(air: Air, function_name: []const u8) @This() {
+        const header_size = std.mem.alignForward(usize, @sizeOf(@This()), TARGET_ALIGNMENT);
+        const tag_size = std.mem.alignForward(usize, air.instructions.len * @sizeOf(Air.Inst.Tag), TARGET_ALIGNMENT);
+        const data_size = std.mem.alignForward(usize, air.instructions.len * @sizeOf(Air.Inst.Data), TARGET_ALIGNMENT);
+        const name_size = std.mem.alignForward(usize, function_name.len, TARGET_ALIGNMENT);
+        const extra_size = std.mem.alignForward(usize, air.extra.len * @sizeOf(@TypeOf(air.extra[0])), TARGET_ALIGNMENT);
+        const total_size = header_size + tag_size + data_size + name_size + extra_size;
+
+        return .{
+            .total_size_bytes = total_size,
+            .function_name_length = function_name.len,
+            .instruction_count = @intCast(air.instructions.len),
+            .extra_data_count = @intCast(air.extra.len),
+        };
+    }
 };
 
 /// Export AIR for all instructions. The main body can be filtered from the instruction indexes stored in extra data.
 pub fn exportAir(writer: std.io.AnyWriter, zcu_per_thread: Zcu.PerThread, air: Air, liveness: ?Liveness, function_name: []const u8) void {
-    const total_size = std.mem.alignForward(usize, air.instructions.len * @sizeOf(Air.Inst) + air.extra.len * @sizeOf(@TypeOf(air.extra[0])), 8);
-    const header = AirHeader{
-        .byte_size = total_size,
-        .function_name_length = function_name.len,
-        .instruction_count = @intCast(air.instructions.len),
-        .extra_data_count = @intCast(air.extra.len),
-    };
+    const header = AirHeader.init(air, function_name);
 
-    {
-        errdefer @panic("exportAir writer failed"); // TODO: handle properly
-        try writer.writeStruct(header);
-        // NOTE: no alignment after function name!
-        try writer.writeAll(function_name);
-        try writer.writeAll(@ptrCast(air.instructions.items(.tag)));
-        try writer.writeAll(@ptrCast(air.instructions.items(.data)));
-        try writer.writeAll(@ptrCast(air.extra));
-    }
+    errdefer @panic("exportAir writer failed"); // TODO: handle properly
+    try writer.writeStruct(header);
+    try writer.writeAll(function_name);
+    try alignWriter(writer, function_name.len, AirHeader.TARGET_ALIGNMENT);
+
+    try writer.writeAll(@ptrCast(air.instructions.items(.tag)));
+    try alignWriter(writer, air.instructions.len * @sizeOf(Air.Inst.Tag), AirHeader.TARGET_ALIGNMENT);
+
+    try writer.writeAll(@ptrCast(air.instructions.items(.data)));
+    try alignWriter(writer, air.instructions.len * @sizeOf(Air.Inst.Data), AirHeader.TARGET_ALIGNMENT);
+
+    try writer.writeAll(@ptrCast(air.extra));
+    try alignWriter(writer, air.extra.len * @sizeOf(@TypeOf(air.extra[0])), AirHeader.TARGET_ALIGNMENT);
 
     // TODO: dump InternPool: AIR instructions contain indexes to entries in Data.bin_op, Data.ty, etc.
     const intern_pool = zcu_per_thread.zcu.intern_pool;
@@ -62,6 +80,16 @@ pub fn exportAirInst(writer: std.io.AnyWriter, instruction_index: Air.Inst.Index
     _ = zcu_per_thread;
     _ = liveness;
     @panic("exportAirInst is not supported yet");
+}
+
+fn alignWriter(writer: anytype, size: usize, comptime target_alignment: usize) !void {
+    const aligned_length = std.mem.alignForward(usize, size, target_alignment);
+    try writer.writeByteNTimes(0, aligned_length - size);
+}
+
+fn alignReader(reader: anytype, size: usize, comptime target_alignment: usize) !void {
+    const aligned_length = std.mem.alignForward(usize, size, target_alignment);
+    try reader.skipBytes(aligned_length - size, .{});
 }
 
 // TODO: extract AIR types and import function into reduced file that is independent of the rest of the compiler.
@@ -93,18 +121,22 @@ pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImp
     errdefer allocator.free(function_name);
     const function_name_bytes_read = try reader.readAll(function_name);
     std.debug.assert(function_name_bytes_read == header.function_name_length * @sizeOf(u8));
+    try alignReader(reader, function_name_bytes_read, AirHeader.TARGET_ALIGNMENT);
 
     const tag_bytes_read = try reader.readAll(@ptrCast(instructions.items(.tag)));
     std.debug.assert(tag_bytes_read == header.instruction_count * @sizeOf(Air.Inst.Tag));
+    try alignReader(reader, tag_bytes_read, AirHeader.TARGET_ALIGNMENT);
 
     const data_bytes_read = try reader.readAll(@ptrCast(instructions.items(.data)));
     std.debug.assert(data_bytes_read == header.instruction_count * @sizeOf(Air.Inst.Data));
+    try alignReader(reader, data_bytes_read, AirHeader.TARGET_ALIGNMENT);
 
     const Extra = u32;
     const extra = try allocator.alloc(Extra, header.extra_data_count);
     errdefer allocator.free(extra);
     const extra_bytes_read = try reader.readAll(@ptrCast(extra));
     std.debug.assert(extra_bytes_read == header.extra_data_count * @sizeOf(Extra));
+    try alignReader(reader, extra_bytes_read, AirHeader.TARGET_ALIGNMENT);
 
     return .{
         .header = header,
@@ -308,11 +340,14 @@ test exportAir {
         const liveness = null;
         const function_name = "test.main";
         exportAir(stream.writer().any(), zcu_per_thread, air, liveness, function_name);
+        const total_size_bytes = try stream.getPos();
 
         try stream.seekTo(0);
         var imported = try importAir(allocator, stream.reader().any());
         defer imported.deinit();
 
+        try t.expectEqual(AirHeader.MAGIC, imported.header.magic);
+        try t.expectEqual(total_size_bytes, imported.header.total_size_bytes);
         try t.expectEqual(function_name.len, imported.header.function_name_length);
         try t.expectEqualStrings(function_name, imported.function_name);
         try t.expectEqual(air.instructions.len, imported.air.instructions.len);

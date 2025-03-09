@@ -71,27 +71,25 @@ pub fn writeInst(
     writer.writeInst(stream, inst) catch return;
 }
 
-var air_export_counter: usize = 0; // FIXME: remove - concatenate in a single file, not one per function.
-
 pub fn dump(pt: Zcu.PerThread, air: Air, liveness: ?Liveness, function_name: []const u8) void {
-    const writer = std.io.getStdErr().writer();
-    write(writer, pt, air, liveness);
+    write(std.io.getStdErr().writer(), pt, air, liveness);
+    dumpBinaryAir(pt, air, liveness, function_name) catch std.log.err("failed exporting binary AIR data for function: {s}", .{function_name});
+}
 
-    const file_index = air_export_counter;
+var air_export_counter: usize = 0;
+
+fn dumpBinaryAir(pt: Zcu.PerThread, air: Air, liveness: ?Liveness, function_name: []const u8) !void {
+    const file_path = "air_export.bair";
+    std.io.getStdErr().writer().print("# Exporting binary AIR to: {s}\n", .{file_path}) catch {};
+
+    // Clear on first write, then append.
+    const truncate = (air_export_counter == 0);
     air_export_counter += 1;
 
-    var path_buffer: [512]u8 = undefined;
-    const file_path = std.fmt.bufPrint(&path_buffer, "air_export_{s}.bair", .{function_name}) catch {
-        std.log.err("failed exporting binary AIR #{d}", .{file_index});
-        return;
-    };
-
-    writer.print("# Exporting binary AIR to: {s}\n", .{file_path}) catch {};
-    const file = std.fs.cwd().createFile(file_path, .{}) catch {
-        std.log.err("failed exporting binary AIR to: {s}", .{file_path});
-        return;
-    };
+    const file = try std.fs.cwd().createFile(file_path, .{ .truncate = truncate });
     defer file.close();
+    try file.seekFromEnd(0);
+
     export_air.exportAir(file.writer().any(), pt, air, liveness, function_name);
 }
 

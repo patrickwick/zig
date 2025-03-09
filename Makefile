@@ -84,3 +84,8 @@ incremental-bin:
 		--zig-lib-dir ${ZIG_LIB_DIR} \
 		-fincremental \
 		--watch
+
+# ./zig-out/bin/zig build-obj --verbose-air ./test.zig 2&> test.air
+.PHONY: xxd
+xxd:
+	xxd -R always ./air_export.bair | less -R
