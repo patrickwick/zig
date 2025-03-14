@@ -8,6 +8,7 @@ const Compilation = @import("Compilation.zig");
 const InternPool = @import("InternPool.zig");
 const Liveness = @import("Liveness.zig");
 const Package = @import("Package.zig");
+const Type = @import("Type.zig");
 const Value = @import("Value.zig");
 const Zcu = @import("Zcu.zig");
 
@@ -69,6 +70,80 @@ pub fn exportAir(writer: std.io.AnyWriter, zcu_per_thread: Zcu.PerThread, air: A
     _ = ip_shared;
     // std.log.err("Local: {any}", .{ip_local});
     // std.log.err("Local shared: {any}", .{ip_shared});
+
+    // TODO: how can the ZCU / InternPool dependent instruction information be tranferred?
+    // Brute force approach below: expand all types and values ahead of time. This is comparable to `print_air.Writer.writeInst`.
+    // => **Is there a better way?**
+    // We should leverage that Zig internal data structures don't contain pointers and can be shared without serialization.
+    // Compiling the AIR and InternPool code as a dependency in the analysis code is also very fast now with a small API surface that can break (0.14.0).
+    {
+        const Print = struct {
+            fn printType(pt: Zcu.PerThread, w: anytype, ty: Type) !void {
+                // TODO: inline implementation to understand data required for representation
+                try w.print("{}", .{ty.fmt(pt)});
+            }
+
+            fn printValue(pt: Zcu.PerThread, w: anytype, value: Value) !void {
+                // TODO: inline implementation to understand data required for representation
+                try w.print("{}", .{value.fmtValue(pt)});
+            }
+        };
+
+        const FromInterned = struct {
+            ty: Type,
+            value: ?Value,
+
+            fn instructionFromInterned(air_ptr: *const Air, pt: Zcu.PerThread, instruction_reference: Air.Inst.Ref) !@This() {
+                // TODO: inline implementation to understand data required for representation
+                const ty = air_ptr.typeOf(instruction_reference, &pt.zcu.intern_pool);
+                const value = try air_ptr.value(instruction_reference, pt);
+                return .{ .ty = ty, .value = value };
+            }
+        };
+
+        const stdout = std.io.getStdOut();
+        const out_writer = stdout.writer();
+
+        const tags = air.instructions.items(.tag);
+        const data = air.instructions.items(.data);
+        for (tags, data, 0..) |tag, variant, instruction_index| {
+            switch (tag) {
+                .store, .store_safe => {
+                    const binary_operation = variant.bin_op;
+                    try out_writer.print("{}: {}\n", .{ tag, binary_operation });
+
+                    const left = try FromInterned.instructionFromInterned(&air, zcu_per_thread, binary_operation.lhs);
+                    const right = try FromInterned.instructionFromInterned(&air, zcu_per_thread, binary_operation.rhs);
+
+                    try out_writer.writeAll("\t");
+                    if (left.value) |value| {
+                        try Print.printType(zcu_per_thread, out_writer, left.ty);
+                        try out_writer.writeAll(" = ");
+                        try Print.printValue(zcu_per_thread, out_writer, value);
+                    } else {
+                        try Print.printType(zcu_per_thread, out_writer, left.ty);
+                        try out_writer.writeAll(" = <no value>");
+                    }
+                    try out_writer.writeByte('\n');
+
+                    try out_writer.writeAll("\t");
+                    if (right.value) |value| {
+                        try Print.printType(zcu_per_thread, out_writer, right.ty);
+                        try out_writer.writeAll(" = ");
+                        try Print.printValue(zcu_per_thread, out_writer, value);
+                    } else {
+                        try Print.printType(zcu_per_thread, out_writer, right.ty);
+                        try out_writer.writeAll(" = <no value>");
+                    }
+                    try out_writer.writeByte('\n');
+
+                    const is_unused = if (liveness) |l| (if (l.isUnused(@enumFromInt(instruction_index))) true else false) else null;
+                    try out_writer.print("\tliveness: {any}\n", .{is_unused});
+                },
+                else => {},
+            }
+        }
+    }
 
     const value = (try air.value(.one, zcu_per_thread)).?;
     _ = value;
@@ -378,11 +453,10 @@ test exportAir {
     try t.expectEqual(air.instructions.len, main_body_indexes.len);
     for (0..air.instructions.len, main_body_indexes) |expected_i, actual_i| try t.expectEqual(expected_i, @intFromEnum(actual_i));
 
-    // Assert that values that rely on the `InternPool` can be recustructed from `Air.Inst.Ref` references.
+    // Assert that values that rely on the `InternPool` can be reconstructed from `Air.Inst.Ref` references.
+    // TODO: Reconstruct inside import function.
+    const ref = Air.Inst.Ref.one; // Arbitrary test reference.
     {
-        const ref = Air.Inst.Ref.one;
-
-        // TODO: Reconstruct inside import function.
         var intern_pool: InternPool = .empty;
         const thread_count = 1;
         try intern_pool.init(allocator, thread_count);
@@ -391,9 +465,7 @@ test exportAir {
         // TODO: try to find root cause of the Value and Zcu.PerThread dependency.
         // => can those be separated for our specific use case?
         // `Air.value` is inlined here and expanded:
-        const value = value: {
-            if (ref.toInterned()) |ip_index| break :value Value.fromInterned(ip_index);
-
+        const value = if (ref.toInterned()) |index| Value.fromInterned(index) else value: {
             const index = ref.toIndex().?; // Can be unwrapped due to the above check.
             const type_value = air.typeOfIndex(index, &intern_pool);
             const value = try type_value.onePossibleValue(zcu_per_thread);
