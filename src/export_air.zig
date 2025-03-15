@@ -14,6 +14,8 @@ const Zcu = @import("Zcu.zig");
 
 pub const DEFAULT_BINARY_AIR_PATH = "air_export.air.bin";
 
+const endianness = builtin.target.cpu.arch.endian();
+
 /// Dumped AIR header with C ABI type for stability.
 pub const AirHeader = extern struct {
     /// Each field is aligned.
@@ -26,26 +28,34 @@ pub const AirHeader = extern struct {
     instruction_count: u64, // in entries, not bytes
     extra_data_count: u64, // in entries, not bytes
 
-    pub fn init(air: Air, function_name: []const u8) @This() {
+    liveness_tomb_bits_count: u64, // in entries, not bytes
+    liveness_extra_count: u64, // in entries, not bytes
+
+    pub fn init(air: Air, liveness: ?Liveness, function_name: []const u8) @This() {
         const header_size = std.mem.alignForward(usize, @sizeOf(@This()), TARGET_ALIGNMENT);
         const tag_size = std.mem.alignForward(usize, air.instructions.len * @sizeOf(Air.Inst.Tag), TARGET_ALIGNMENT);
         const data_size = std.mem.alignForward(usize, air.instructions.len * @sizeOf(Air.Inst.Data), TARGET_ALIGNMENT);
         const name_size = std.mem.alignForward(usize, function_name.len, TARGET_ALIGNMENT);
         const extra_size = std.mem.alignForward(usize, air.extra.len * @sizeOf(@TypeOf(air.extra[0])), TARGET_ALIGNMENT);
-        const total_size = header_size + tag_size + data_size + name_size + extra_size;
+        const livenes_tomb_bits_size = if (liveness) |l| std.mem.alignForward(usize, l.tomb_bits.len * @sizeOf(@TypeOf(l.tomb_bits[0])), TARGET_ALIGNMENT) else 0;
+
+        const total_size = header_size + tag_size + data_size + name_size + extra_size + livenes_tomb_bits_size;
 
         return .{
             .total_size_bytes = total_size,
             .function_name_length = function_name.len,
             .instruction_count = @intCast(air.instructions.len),
             .extra_data_count = @intCast(air.extra.len),
+            .liveness_tomb_bits_count = if (liveness) |l| l.tomb_bits.len else 0,
+            .liveness_extra_count = if (liveness) |l| l.extra.len else 0,
         };
     }
 };
 
 /// Export AIR for all instructions. The main body can be filtered from the instruction indexes stored in extra data.
+/// Native endianness only - assumed to be used on the same machine in a different process.
 pub fn exportAir(writer: std.io.AnyWriter, zcu_per_thread: Zcu.PerThread, air: Air, liveness: ?Liveness, function_name: []const u8) void {
-    const header = AirHeader.init(air, function_name);
+    const header = AirHeader.init(air, liveness, function_name);
 
     errdefer @panic("exportAir writer failed"); // TODO: handle properly
     try writer.writeStruct(header);
@@ -71,12 +81,41 @@ pub fn exportAir(writer: std.io.AnyWriter, zcu_per_thread: Zcu.PerThread, air: A
     // std.log.err("Local: {any}", .{ip_local});
     // std.log.err("Local shared: {any}", .{ip_shared});
 
+    // TODO: dump liveness
+    if (liveness) |l| {
+        try writer.writeAll(@ptrCast(l.tomb_bits));
+        try alignWriter(writer, l.tomb_bits.len * @sizeOf(@TypeOf(l.tomb_bits[0])), AirHeader.TARGET_ALIGNMENT);
+
+        try writer.writeAll(@ptrCast(l.extra));
+        try alignWriter(writer, l.extra.len * @sizeOf(@TypeOf(l.extra[0])), AirHeader.TARGET_ALIGNMENT);
+
+        // TODO: serialize hashmap or just drop special?
+        // => how important is this data for analysis? Can the Liveness lookups handle missing special data?
+        // try writer.writeAll(l.special);
+        // try alignWriter(writer, l.special.len * @sizeOf(@TypeOf(l.special[0])), AirHeader.TARGET_ALIGNMENT);
+    }
+
+    // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    // defer gpa.deinit();
+
+    // var arena = std.heap.ArenaAllocator.init(gpa.allocator());
+    // defer arena.deinit();
+    // const arena_allocator = arena.allocator();
+
+    // const extra = ip_local.getMutableExtra(arena_allocator);
+    // const extra_tags = extra.view().items(.file);
+    // const extra_inst = extra.view().items(.inst);
+    // try writer.writeAll(extra_tags);
+    // // try alignWriter(writer, air.extra.len * @sizeOf(@TypeOf(air.extra[0])), AirHeader.TARGET_ALIGNMENT);
+    // try writer.writeAll(extra_inst);
+    // // try alignWriter(writer, air.extra.len * @sizeOf(@TypeOf(air.extra[0])), AirHeader.TARGET_ALIGNMENT);
+
     // TODO: how can the ZCU / InternPool dependent instruction information be tranferred?
     // Brute force approach below: expand all types and values ahead of time. This is comparable to `print_air.Writer.writeInst`.
     // => **Is there a better way?**
     // We should leverage that Zig internal data structures don't contain pointers and can be shared without serialization.
     // Compiling the AIR and InternPool code as a dependency in the analysis code is also very fast now with a small API surface that can break (0.14.0).
-    {
+    if (false) {
         const Print = struct {
             fn printType(pt: Zcu.PerThread, w: anytype, ty: Type) !void {
                 // TODO: inline implementation to understand data required for representation
@@ -373,18 +412,6 @@ pub fn exportAir(writer: std.io.AnyWriter, zcu_per_thread: Zcu.PerThread, air: A
             }
         }
     }
-
-    const value = (try air.value(.one, zcu_per_thread)).?;
-    _ = value;
-    // std.log.err("value: {any}\n{any}", .{ value.fmtDebug(), value.fmtValue(zcu_per_thread) });
-
-    // TODO: dump additional data on demand: Data.ty_pl contains a u32 index into additional data
-    // => what data exactly?
-
-    // TODO: dump liveness
-    if (liveness) |l| {
-        _ = l;
-    }
 }
 
 /// Export AIR starting from a specific instruction index.
@@ -414,14 +441,18 @@ pub const AirImported = struct {
     header: AirHeader,
     function_name: []const u8,
     air: Air,
+    intern_pool: InternPool,
     /// Instructions owned by the caller that needs to free it using the provided allocator.
     instructions_owned: std.MultiArrayList(Air.Inst),
+    liveness: ?Liveness,
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *@This()) void {
         self.instructions_owned.deinit(self.allocator);
         self.allocator.free(self.function_name);
         self.allocator.free(self.air.extra);
+        if (self.liveness) |l| self.allocator.free(l.tomb_bits);
+        if (self.liveness) |l| self.allocator.free(l.extra);
     }
 };
 
@@ -454,6 +485,33 @@ pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImp
     std.debug.assert(extra_bytes_read == header.extra_data_count * @sizeOf(Extra));
     try alignReader(reader, extra_bytes_read, AirHeader.TARGET_ALIGNMENT);
 
+    const liveness = l: {
+        if (header.liveness_tomb_bits_count == 0 and header.liveness_extra_count == 0) break :l null;
+
+        const tomb_bits = try allocator.alloc(usize, header.liveness_tomb_bits_count);
+        errdefer allocator.free(tomb_bits);
+        const liveness_tomb_bits_read = try reader.readAll(@ptrCast(tomb_bits));
+        std.debug.assert(liveness_tomb_bits_read == header.liveness_tomb_bits_count * @sizeOf(usize));
+        try alignReader(reader, liveness_tomb_bits_read, AirHeader.TARGET_ALIGNMENT);
+
+        // TODO: extra
+        const liveness_extra = try allocator.alloc(u32, header.liveness_extra_count);
+        errdefer allocator.free(liveness_extra);
+        const liveness_extra_read = try reader.readAll(@ptrCast(liveness_extra));
+        std.debug.assert(liveness_extra_read == header.liveness_extra_count * @sizeOf(u32));
+        try alignReader(reader, liveness_extra_read, AirHeader.TARGET_ALIGNMENT);
+
+        // TODO: add special or leave it?
+
+        break :l Liveness{
+            .tomb_bits = tomb_bits,
+            .extra = liveness_extra,
+            .special = .{},
+        };
+    };
+
+    const intern_pool = InternPool.empty;
+
     return .{
         .header = header,
         .function_name = function_name,
@@ -461,7 +519,9 @@ pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImp
             .instructions = instructions.slice(),
             .extra = extra,
         },
+        .intern_pool = intern_pool,
         .instructions_owned = instructions,
+        .liveness = liveness,
         .allocator = allocator,
     };
 }
@@ -648,11 +708,17 @@ test exportAir {
         .extra = &extra,
     };
 
+    var tomb_bits = [_]usize{ 1, 2 };
+    const liveness = Liveness{
+        .tomb_bits = &tomb_bits,
+        .extra = &.{},
+        .special = .{},
+    };
+
     // Export, import and assert data.
     const buffer_size = 1024;
     var buffer = [1]u8{0} ** buffer_size;
     var stream = std.io.FixedBufferStream([]u8){ .buffer = &buffer, .pos = 0 };
-    const liveness = null;
     const function_name = "test.main";
     exportAir(stream.writer().any(), zcu_per_thread, air, liveness, function_name);
     const total_size_bytes = try stream.getPos();
@@ -667,6 +733,9 @@ test exportAir {
     try t.expectEqualStrings(function_name, imported.function_name);
     try t.expectEqual(air.instructions.len, imported.air.instructions.len);
     try t.expectEqual(air.extra.len, imported.air.extra.len);
+    try t.expectEqualSlices(usize, imported.liveness.?.tomb_bits, liveness.tomb_bits);
+    try t.expectEqualSlices(u32, imported.liveness.?.extra, liveness.extra);
+    try t.expectEqual(imported.liveness.?.special.count(), liveness.special.count());
 
     const tags = imported.air.instructions.items(.tag);
     const variants = imported.air.instructions.items(.data);
@@ -700,9 +769,7 @@ test exportAir {
             const value = try type_value.onePossibleValue(zcu_per_thread);
             break :value value;
         };
-
-        const v = value.?;
-        std.log.err("value: {any} = {any}", .{ v.fmtDebug(), v.fmtValue(zcu_per_thread) });
+        _ = value; // TODO: NYI
     }
 }
 

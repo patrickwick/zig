@@ -49,6 +49,8 @@ pub fn main() !void {
         \\{any}
     , .{ air_import.function_name, main_body_indexes, air_import.air });
 
+    const liveness = air_import.liveness orelse @panic("Liveness is required");
+
     // Detect division by zero as a simple PoC using symbolic execution.
     {
         // TODO(pwr): add store for variables.
@@ -61,44 +63,54 @@ pub fn main() !void {
             const i = @intFromEnum(instruction_index);
             const tag = tags[i];
             const variant = data[i];
+            const unused = liveness.isUnused(instruction_index);
+            const unused_indicator: u8 = if (unused) '!' else ' ';
 
             // TODO(pwr): dereference the `Air.Inst.Ref` from intern pool => not exported yet.
+
+            const tag_format = "{}{c}= {s}(";
+            const tag_name = @tagName(tag);
+
             // NOTE: see Air.Inst.Tag for documentation on the mapping.
             switch (tag) {
                 .dbg_stmt => {
                     const debug_statement = variant.dbg_stmt;
-                    std.log.info("{} {}: {}", .{ instruction_index, tag, debug_statement });
+                    std.log.info(tag_format ++ ") # {}", .{ instruction_index, unused_indicator, tag_name, debug_statement });
                 },
                 .dbg_var_ptr => {
                     const payload_operand = variant.pl_op;
-                    std.log.info("{} {}: {}", .{ instruction_index, tag, payload_operand });
+                    std.log.info(tag_format ++ ") # {}", .{ instruction_index, unused_indicator, tag_name, payload_operand });
                 },
                 .dbg_var_val => {
                     const payload_operand = variant.pl_op;
-                    std.log.info("{} {}: {}", .{ instruction_index, tag, payload_operand });
+                    std.log.info(tag_format ++ ") # {}", .{ instruction_index, unused_indicator, tag_name, payload_operand });
                 },
                 .store, .store_safe => {
                     const binary_operation = variant.bin_op;
-                    std.log.info("{} {}: {}", .{ instruction_index, tag, binary_operation });
+                    std.log.info(tag_format ++ ") # {}", .{ instruction_index, unused_indicator, tag_name, binary_operation });
                 },
                 .load => {
                     const type_operand = variant.ty_op;
-                    std.log.info("{} {}: {}", .{ instruction_index, tag, type_operand });
+                    std.log.info(tag_format ++ ") # {}", .{ instruction_index, unused_indicator, tag_name, type_operand });
                 },
                 .mul_with_overflow => {
                     const type_payload = variant.ty_pl;
-                    std.log.info("{} {}: {}", .{ instruction_index, tag, type_payload });
+                    std.log.info(tag_format ++ ") # {}", .{ instruction_index, unused_indicator, tag_name, type_payload });
                 },
                 .sub_with_overflow => {
                     const type_payload = variant.ty_pl;
-                    std.log.info("{} {}: {}", .{ instruction_index, tag, type_payload });
+                    std.log.info(tag_format ++ ") # {}", .{ instruction_index, unused_indicator, tag_name, type_payload });
                 },
                 .div_trunc => {
                     const binary_operation = variant.bin_op;
-                    std.log.info("{} {}: {}", .{ instruction_index, tag, binary_operation });
+                    std.log.info(tag_format ++ ") # {}", .{ instruction_index, unused_indicator, tag_name, binary_operation });
+                },
+                .ret_safe => {
+                    const unary_operation = variant.un_op;
+                    std.log.info(tag_format ++ ") # {}", .{ instruction_index, unused_indicator, tag_name, unary_operation });
                 },
                 // TODO(pwr): implement all instructions.
-                else => std.log.info("{} {}", .{ instruction_index, tag }),
+                else => std.log.info(tag_format ++ ")", .{ instruction_index, unused_indicator, tag_name }),
             }
         }
     }
