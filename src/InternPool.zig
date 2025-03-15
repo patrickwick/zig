@@ -5788,7 +5788,8 @@ pub const Tag = enum(u8) {
             .config = .{ .@"trailing.arg_values.len" = .@"payload.args_len" },
         },
     };
-    fn Payload(comptime tag: Tag) type {
+    // TODO(pwr): remove pub again - temporary for testing
+    pub fn Payload(comptime tag: Tag) type {
         return @field(encodings, @tagName(tag)).payload;
     }
 
@@ -6516,7 +6517,8 @@ pub const Int = packed struct {
     ty: Index,
     limbs_len: u32,
 
-    const limbs_items_len = @divExact(@sizeOf(Int), @sizeOf(Limb));
+    // TODO(pwr): remove pub again - temporarily for testing
+    pub const limbs_items_len = @divExact(@sizeOf(Int), @sizeOf(Limb));
 };
 
 pub const IntSmall = struct {

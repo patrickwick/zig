@@ -91,13 +91,242 @@ pub fn exportAir(writer: std.io.AnyWriter, zcu_per_thread: Zcu.PerThread, air: A
 
         const FromInterned = struct {
             ty: Type,
-            value: ?Value,
+            value: ?Value, // null if runtime value
 
-            fn instructionFromInterned(air_ptr: *const Air, pt: Zcu.PerThread, instruction_reference: Air.Inst.Ref) !@This() {
-                // TODO: inline implementation to understand data required for representation
-                const ty = air_ptr.typeOf(instruction_reference, &pt.zcu.intern_pool);
-                const value = try air_ptr.value(instruction_reference, pt);
-                return .{ .ty = ty, .value = value };
+            // inlined implementations to understand data required for representation:
+            // const ty = air_ptr.typeOf(instruction_reference, &pt.zcu.intern_pool);
+            // const value = try air_ptr.value(instruction_ref, pt);
+            fn instructionFromInterned(air_ptr: *const Air, pt: Zcu.PerThread, instruction_ref: Air.Inst.Ref) !@This() {
+                const intern_index = instruction_ref.toInterned();
+                if (intern_index) |ip_index| {
+                    const Inlined = struct {
+                        fn typeOf(ip: *const InternPool, index: InternPool.Index) InternPool.Index {
+                            // This optimization of static keys is required so that typeOf can be called
+                            // on static keys that haven't been added yet during static key initialization.
+                            // An alternative would be to topological sort the static keys, but this would
+                            // mean that the range of type indices would not be dense.
+                            return switch (index) {
+                                .u0_type,
+                                .i0_type,
+                                .u1_type,
+                                .u8_type,
+                                .i8_type,
+                                .u16_type,
+                                .i16_type,
+                                .u29_type,
+                                .u32_type,
+                                .i32_type,
+                                .u64_type,
+                                .i64_type,
+                                .u80_type,
+                                .u128_type,
+                                .i128_type,
+                                .usize_type,
+                                .isize_type,
+                                .c_char_type,
+                                .c_short_type,
+                                .c_ushort_type,
+                                .c_int_type,
+                                .c_uint_type,
+                                .c_long_type,
+                                .c_ulong_type,
+                                .c_longlong_type,
+                                .c_ulonglong_type,
+                                .c_longdouble_type,
+                                .f16_type,
+                                .f32_type,
+                                .f64_type,
+                                .f80_type,
+                                .f128_type,
+                                .anyopaque_type,
+                                .bool_type,
+                                .void_type,
+                                .type_type,
+                                .anyerror_type,
+                                .comptime_int_type,
+                                .comptime_float_type,
+                                .noreturn_type,
+                                .anyframe_type,
+                                .null_type,
+                                .undefined_type,
+                                .enum_literal_type,
+                                .manyptr_u8_type,
+                                .manyptr_const_u8_type,
+                                .manyptr_const_u8_sentinel_0_type,
+                                .single_const_pointer_to_comptime_int_type,
+                                .slice_const_u8_type,
+                                .slice_const_u8_sentinel_0_type,
+                                .vector_16_i8_type,
+                                .vector_32_i8_type,
+                                .vector_16_u8_type,
+                                .vector_32_u8_type,
+                                .vector_8_i16_type,
+                                .vector_16_i16_type,
+                                .vector_8_u16_type,
+                                .vector_16_u16_type,
+                                .vector_4_i32_type,
+                                .vector_8_i32_type,
+                                .vector_4_u32_type,
+                                .vector_8_u32_type,
+                                .vector_2_i64_type,
+                                .vector_4_i64_type,
+                                .vector_2_u64_type,
+                                .vector_4_u64_type,
+                                .vector_4_f16_type,
+                                .vector_8_f16_type,
+                                .vector_2_f32_type,
+                                .vector_4_f32_type,
+                                .vector_8_f32_type,
+                                .vector_2_f64_type,
+                                .vector_4_f64_type,
+                                .optional_noreturn_type,
+                                .anyerror_void_error_union_type,
+                                .adhoc_inferred_error_set_type,
+                                .generic_poison_type,
+                                .empty_tuple_type,
+                                => .type_type,
+
+                                .undef => .undefined_type,
+                                .zero, .one, .negative_one => .comptime_int_type,
+                                .zero_usize, .one_usize => .usize_type,
+                                .zero_u8, .one_u8, .four_u8 => .u8_type,
+                                .void_value => .void_type,
+                                .unreachable_value => .noreturn_type,
+                                .null_value => .null_type,
+                                .bool_true, .bool_false => .bool_type,
+                                .empty_tuple => .empty_tuple_type,
+
+                                // This optimization on tags is needed so that indexToKey can call
+                                // typeOf without being recursive.
+                                _ => {
+                                    const unwrapped_index = index.unwrap(ip);
+                                    const item = unwrapped_index.getItem(ip);
+                                    return switch (item.tag) {
+                                        .removed => unreachable,
+
+                                        .type_int_signed,
+                                        .type_int_unsigned,
+                                        .type_array_big,
+                                        .type_array_small,
+                                        .type_vector,
+                                        .type_pointer,
+                                        .type_slice,
+                                        .type_optional,
+                                        .type_anyframe,
+                                        .type_error_union,
+                                        .type_anyerror_union,
+                                        .type_error_set,
+                                        .type_inferred_error_set,
+                                        .type_enum_auto,
+                                        .type_enum_explicit,
+                                        .type_enum_nonexhaustive,
+                                        .type_opaque,
+                                        .type_struct,
+                                        .type_struct_packed,
+                                        .type_struct_packed_inits,
+                                        .type_tuple,
+                                        .type_union,
+                                        .type_function,
+                                        => .type_type,
+
+                                        .undef,
+                                        .opt_null,
+                                        .only_possible_value,
+                                        => @enumFromInt(item.data),
+
+                                        .simple_type, .simple_value => unreachable, // handled via Index above
+
+                                        inline .ptr_nav,
+                                        .ptr_comptime_alloc,
+                                        .ptr_uav,
+                                        .ptr_uav_aligned,
+                                        .ptr_comptime_field,
+                                        .ptr_int,
+                                        .ptr_eu_payload,
+                                        .ptr_opt_payload,
+                                        .ptr_elem,
+                                        .ptr_field,
+                                        .ptr_slice,
+                                        .opt_payload,
+                                        .error_union_payload,
+                                        .int_small,
+                                        .int_lazy_align,
+                                        .int_lazy_size,
+                                        .error_set_error,
+                                        .error_union_error,
+                                        .enum_tag,
+                                        .variable,
+                                        .@"extern",
+                                        .func_decl,
+                                        .func_instance,
+                                        .func_coerced,
+                                        .union_value,
+                                        .bytes,
+                                        .aggregate,
+                                        .repeated,
+                                        => |ty| {
+                                            const extra_list = unwrapped_index.getExtra(ip);
+                                            return @enumFromInt(extra_list.view().items(.@"0")[item.data + std.meta.fieldIndex(ty.Payload(), "ty").?]);
+                                        },
+
+                                        .int_u8 => .u8_type,
+                                        .int_u16 => .u16_type,
+                                        .int_u32 => .u32_type,
+                                        .int_i32 => .i32_type,
+                                        .int_usize => .usize_type,
+
+                                        .int_comptime_int_u32,
+                                        .int_comptime_int_i32,
+                                        => .comptime_int_type,
+
+                                        // Note these are stored in limbs data, not extra data.
+                                        .int_positive,
+                                        .int_negative,
+                                        => {
+                                            const limbs_list = ip.getLocalShared(unwrapped_index.tid).getLimbs();
+                                            const int: InternPool.Int = @bitCast(limbs_list.view().items(.@"0")[item.data..][0..InternPool.Int.limbs_items_len].*);
+                                            return int.ty;
+                                        },
+
+                                        .enum_literal => .enum_literal_type,
+                                        .float_f16 => .f16_type,
+                                        .float_f32 => .f32_type,
+                                        .float_f64 => .f64_type,
+                                        .float_f80 => .f80_type,
+                                        .float_f128 => .f128_type,
+
+                                        .float_c_longdouble_f80,
+                                        .float_c_longdouble_f128,
+                                        => .c_longdouble_type,
+
+                                        .float_comptime_float => .comptime_float_type,
+
+                                        .memoized_call => unreachable,
+                                    };
+                                },
+
+                                .none => unreachable,
+                            };
+                        }
+                    };
+
+                    const interned_type = Inlined.typeOf(&pt.zcu.intern_pool, ip_index);
+
+                    return .{
+                        .ty = Type.fromInterned(interned_type),
+                        .value = Value.fromInterned(ip_index),
+                    };
+                }
+
+                // TODO: inline -> extract intern pool dependency
+                const ty = air_ptr.typeOfIndex(instruction_ref.toIndex().?, &pt.zcu.intern_pool);
+                const index = instruction_ref.toIndex().?;
+                // TODO: inline -> extract ZCU per thread dependency
+                const value = try air_ptr.typeOfIndex(index, &pt.zcu.intern_pool).onePossibleValue(pt);
+                return .{
+                    .ty = ty,
+                    .value = value,
+                };
             }
         };
 
