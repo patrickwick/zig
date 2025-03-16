@@ -93,7 +93,7 @@ xxd:
 
 .PHONY: analyze
 analyze:
-	$(shell cd ./analyzer; zig build run)
+	cd ./analyzer && zig build run
 
 .PHONY: test-integration
 test-integration:

@@ -66,7 +66,7 @@ pub fn main() !void {
         \\# Liveness tomb_bits:       {d} entries
         \\# Liveness Extra Data:      {d} entries
         \\# Liveness special table:   not supported
-        \\# Main body indexes: {any}
+        \\# Main body indexes:        {any}
         \\
     , .{
         air_import.function_name,
@@ -152,9 +152,7 @@ pub fn main() !void {
         // TODO(pwr): how can identifiers be traced back? Using only the `dbg_x` instructions?
         // * Is any additional information required or does the fully qualified name, source code and AIR suffice?
 
-        const tag_format = "{}{c}= {s}(";
-
-        // TODO(pwr): extract to air.zig
+        // TODO(pwr): extract to a writer in air.zig
         const Helpers = struct {
             // Highest bit indicates if it's an AIR instruction index or intern pool reference.
             fn isInstructionReference(ref: air_lib.Air.Inst.Ref) bool {
@@ -168,22 +166,17 @@ pub fn main() !void {
                 return name.toSlice(air.*); // TODO(pwr): format escapes.
             }
 
-            // TODO(pwr): use a writer instead of log and split common header part from individual tags
-            fn logPayloadOperand(writer: anytype, air: *const air_lib.Air, index: air_lib.Air.Inst.Index, unused: bool, tag: air_lib.Air.Inst.Tag, payload_operand: anytype) !void {
-                const tag_name = @tagName(tag);
+            fn writeInstructionHeader(writer: anytype, index: air_lib.Air.Inst.Index, unused: bool, tag: air_lib.Air.Inst.Tag) !void {
+                const unused_indicator: u8 = if (unused) '!' else ' ';
+                try writer.print("{}{c}= {s}", .{ index, unused_indicator, @tagName(tag) });
+            }
+
+            fn writePayloadOperand(writer: anytype, air: *const air_lib.Air, payload_operand: anytype) !void {
                 const is_instruction_ref = @This().isInstructionReference(payload_operand.operand);
                 const ref_display = if (is_instruction_ref) @as(u31, @truncate(@intFromEnum(payload_operand.operand))) else @intFromEnum(payload_operand.operand);
                 const payload_display = @This().derefStringPayload(air, @intCast(payload_operand.payload));
-                const unused_indicator: u8 = if (unused) '!' else ' ';
 
-                try writer.print(tag_format ++ "{s}{}, \"{s}\")\n", .{
-                    index,
-                    unused_indicator,
-                    tag_name,
-                    if (is_instruction_ref) "%" else "",
-                    ref_display,
-                    payload_display,
-                });
+                try writer.print("({s}{}, \"{s}\")", .{ if (is_instruction_ref) "%" else "", ref_display, payload_display });
             }
         };
 
@@ -194,9 +187,9 @@ pub fn main() !void {
             const tag = tags[i];
             const variant = data[i];
             const unused = liveness.isUnused(instruction_index);
-            const unused_indicator: u8 = if (unused) '!' else ' ';
 
-            const tag_name = @tagName(tag);
+            try Helpers.writeInstructionHeader(out, instruction_index, unused, tag);
+            defer out.writeByte('\n') catch {};
 
             // NOTE: see Air.Inst.Tag for documentation on the mapping.
             switch (tag) {
@@ -210,43 +203,37 @@ pub fn main() !void {
                 .select,
                 .switch_br,
                 .@"try",
-                => try Helpers.logPayloadOperand(out, &air_import.air, instruction_index, unused, tag, variant.pl_op),
+                => try Helpers.writePayloadOperand(out, &air_import.air, variant.pl_op),
 
                 .dbg_stmt => { // %40!= dbg_stmt(5:17)
                     const debug_statement = variant.dbg_stmt;
-                    try out.print(tag_format ++ "{}:{})\n", .{
-                        instruction_index,
-                        unused_indicator,
-                        tag_name,
-                        debug_statement.line,
-                        debug_statement.column,
-                    });
+                    try out.print("({}:{})", .{ debug_statement.line, debug_statement.column });
                 },
 
                 .dbg_var_ptr, // %4!= dbg_var_ptr(%2, "a")
                 .dbg_var_val, // %39!= dbg_var_val(%38, "b")
                 .dbg_arg_inline,
-                => try Helpers.logPayloadOperand(out, &air_import.air, instruction_index, unused, tag, variant.pl_op),
+                => try Helpers.writePayloadOperand(out, &air_import.air, variant.pl_op),
 
                 .store, .store_safe => {
                     const binary_operation = variant.bin_op;
-                    try out.print(tag_format ++ ") # {}\n", .{ instruction_index, unused_indicator, tag_name, binary_operation });
+                    try out.print("() # {}", .{binary_operation});
                 },
                 .load => {
                     const type_operand = variant.ty_op;
-                    try out.print(tag_format ++ ") # {}\n", .{ instruction_index, unused_indicator, tag_name, type_operand });
+                    try out.print("() # {}", .{type_operand});
                 },
                 .mul_with_overflow => {
                     const type_payload = variant.ty_pl;
-                    try out.print(tag_format ++ ") # {}\n", .{ instruction_index, unused_indicator, tag_name, type_payload });
+                    try out.print("() # {}", .{type_payload});
                 },
                 .sub_with_overflow => {
                     const type_payload = variant.ty_pl;
-                    try out.print(tag_format ++ ") # {}\n", .{ instruction_index, unused_indicator, tag_name, type_payload });
+                    try out.print("() # {}", .{type_payload});
                 },
                 .div_trunc => {
                     const binary_operation = variant.bin_op;
-                    try out.print(tag_format ++ ") # {}\n", .{ instruction_index, unused_indicator, tag_name, binary_operation });
+                    try out.print("() # {}", .{binary_operation});
                 },
                 .ret_safe => {
                     const unary_operation = variant.un_op;
@@ -261,10 +248,10 @@ pub fn main() !void {
                         break :value air_lib.Value{ .ip_index = type_value.ip_index };
                     };
 
-                    try out.print(tag_format ++ "@{any} - {any})\n", .{ instruction_index, unused_indicator, tag_name, unary_operation, value.ip_index });
+                    try out.print("(@{any} - {any})", .{ unary_operation, value.ip_index });
                 },
                 // TODO(pwr): implement all instructions.
-                else => try out.print(tag_format ++ ")\n", .{ instruction_index, unused_indicator, tag_name }),
+                else => {},
             }
         }
     }
