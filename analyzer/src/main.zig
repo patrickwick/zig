@@ -19,6 +19,11 @@ pub fn main() !void {
     defer arena.deinit();
     const arena_allocator = arena.allocator();
 
+    var intern_pool: air_lib.InternPool = .empty;
+    const thread_count = 1;
+    try intern_pool.init(arena_allocator, thread_count);
+    defer intern_pool.deinit(arena_allocator);
+
     const air_file_path = "../" ++ air_lib.DEFAULT_BINARY_AIR_PATH;
     const air_file = try std.fs.cwd().openFile(air_file_path, .{});
     defer air_file.close();
@@ -52,10 +57,96 @@ pub fn main() !void {
     const liveness = air_import.liveness orelse @panic("Liveness is required");
 
     // Detect division by zero as a simple PoC using symbolic execution.
+    //
+    // # Begin Function AIR: test.main:
+    // # Total AIR+Liveness bytes: 1012B
+    // # AIR Instructions:         48 (432B)
+    // # AIR Extra Data:           83 (332B)
+    // # Liveness tomb_bits:       24B
+    // # Liveness Extra Data:      18 (72B)
+    // # Liveness special table:   6 (48B)
+    // %0!= save_err_return_trace_index()
+    // %1!= dbg_stmt(2:5)
+    // %2 = alloc(*usize)
+    // %3!= store_safe(%2, <usize, 5>)
+    // %4!= dbg_var_ptr(%2, "a")
+    // %5!= dbg_stmt(3:5)
+    // %6 = load(usize, %2)
+    // %7!= dbg_stmt(3:7)
+    // %8 = mul_with_overflow(struct { usize, u1 }, %6!, <usize, 2>)
+    // %9 = struct_field_val(%8, 1)
+    // %10 = cmp_eq(%9!, <u1, 0>)
+    // %13!= block(void, {
+    //   %14!= cond_br(%10!, likely {
+    //     %15!= br(%13, @Air.Inst.Ref.void_value)
+    //   }, cold {
+    //     %2! %8!
+    //     %11!= call(<fn () noreturn, (function 'integerOverflow')>, [])
+    //     %12!= unreach()
+    //   })
+    // } %10!)
+    // %16 = struct_field_val(%8!, 0)
+    // %17!= store_safe(%2, %16!)
+    // %18!= dbg_stmt(4:5)
+    // %19 = load(usize, %2)
+    // %20 = load(usize, %2)
+    // %21!= dbg_stmt(4:22)
+    // %22 = sub_with_overflow(struct { usize, u1 }, %19!, %20!)
+    // %23 = struct_field_val(%22, 1)
+    // %24 = cmp_eq(%23!, <u1, 0>)
+    // %27!= block(void, {
+    //   %28!= cond_br(%24!, likely {
+    //     %29!= br(%27, @Air.Inst.Ref.void_value)
+    //   }, cold {
+    //     %2! %22!
+    //     %25!= call(<fn () noreturn, (function 'integerOverflow')>, [])
+    //     %26!= unreach()
+    //   })
+    // } %24!)
+    // %30 = struct_field_val(%22!, 0)
+    // %31!= dbg_stmt(4:17)
+    // %32 = cmp_neq(%30, @Air.Inst.Ref.zero_usize)
+    // %35!= block(void, {
+    //   %36!= cond_br(%32!, likely {
+    //     %37!= br(%35, @Air.Inst.Ref.void_value)
+    //   }, cold {
+    //     %2! %30!
+    //     %33!= call(<fn () noreturn, (function 'divideByZero')>, [])
+    //     %34!= unreach()
+    //   })
+    // } %32!)
+    // %38 = div_trunc(@Air.Inst.Ref.one_usize, %30!)
+    // %39!= dbg_var_val(%38, "b")
+    // %40!= dbg_stmt(5:17)
+    // %41 = load(usize, %2)
+    // %42 = load(usize, %2!)
+    // %43 = aggregate_init(struct { usize, usize, usize }, [%41!, %42!, %38!])
+    // %45!= dbg_stmt(5:17)
+    // %46!= call(<fn (struct { usize, usize, usize }) void, (function 'info__anon_2904')>, [%43!])
+    // %47!= ret_safe(@Air.Inst.Ref.void_value)
+    // # End Function AIR: test.main
     {
         // TODO(pwr): add store for variables.
         // TODO(pwr): how can identifiers be traced back? Using only the `dbg_x` instructions?
         // * Is any additional information required or does the fully qualified name, source code and AIR suffice?
+
+        // TODO(pwr): extract to air.zig
+        const Helpers = struct {
+            // Highest bit indicates if it's an AIR instruction index or intern pool reference.
+            fn isInstructionReference(ref: air_lib.Air.Inst.Ref) bool {
+                return @as(u1, @intCast(@intFromEnum(ref) >> 31)) == 1;
+            }
+
+            // Dereference payload data from extra.
+            // Some instruction types (e.g. pl_op) use a payload index into extra data for variable length data.
+            fn derefPayload(payload: u32, extra: []const u32) []const u8 {
+                const end = for (payload..extra.len) |i| {
+                    if (extra[i] == 0) break i;
+                } else extra.len;
+                const extra_slice = extra[payload..end];
+                return @ptrCast(extra_slice);
+            }
+        };
 
         const tags = air_import.instructions_owned.items(.tag);
         const data = air_import.instructions_owned.items(.data);
@@ -66,8 +157,6 @@ pub fn main() !void {
             const unused = liveness.isUnused(instruction_index);
             const unused_indicator: u8 = if (unused) '!' else ' ';
 
-            // TODO(pwr): dereference the `Air.Inst.Ref` from intern pool => not exported yet.
-
             const tag_format = "{}{c}= {s}(";
             const tag_name = @tagName(tag);
 
@@ -77,9 +166,22 @@ pub fn main() !void {
                     const debug_statement = variant.dbg_stmt;
                     std.log.info(tag_format ++ ") # {}", .{ instruction_index, unused_indicator, tag_name, debug_statement });
                 },
+                // %4!= dbg_var_ptr(%2, "a")
                 .dbg_var_ptr => {
                     const payload_operand = variant.pl_op;
-                    std.log.info(tag_format ++ ") # {}", .{ instruction_index, unused_indicator, tag_name, payload_operand });
+
+                    const is_instruction_ref = Helpers.isInstructionReference(payload_operand.operand);
+                    const ref_display = if (is_instruction_ref) @as(u31, @truncate(@intFromEnum(payload_operand.operand))) else @intFromEnum(payload_operand.operand);
+                    const payload_display = Helpers.derefPayload(payload_operand.payload, air_import.air.extra);
+
+                    std.log.info(tag_format ++ "{s}{}, \"{s}\")", .{
+                        instruction_index,
+                        unused_indicator,
+                        tag_name,
+                        if (is_instruction_ref) "%" else "",
+                        ref_display,
+                        payload_display,
+                    });
                 },
                 .dbg_var_val => {
                     const payload_operand = variant.pl_op;
@@ -107,7 +209,18 @@ pub fn main() !void {
                 },
                 .ret_safe => {
                     const unary_operation = variant.un_op;
-                    std.log.info(tag_format ++ ") # {}", .{ instruction_index, unused_indicator, tag_name, unary_operation });
+
+                    // TODO(pwr): extract function to air.zig
+                    const value = if (unary_operation.toInterned()) |index| air_lib.Value.fromInterned(index) else value: {
+                        const index = unary_operation.toIndex().?; // Can be unwrapped due to the above check.
+                        const type_value = air_import.air.typeOfIndex(index, &intern_pool);
+                        // TODO(pwr): reconstruct Type and Value without a Zcu.PerThread dependency.
+                        // const value = try type_value.onePossibleValue(zcu_per_thread);
+                        // break :value value;
+                        break :value air_lib.Value{ .ip_index = type_value.ip_index };
+                    };
+
+                    std.log.info(tag_format ++ "@{any} - {any})", .{ instruction_index, unused_indicator, tag_name, unary_operation, value.ip_index });
                 },
                 // TODO(pwr): implement all instructions.
                 else => std.log.info(tag_format ++ ")", .{ instruction_index, unused_indicator, tag_name }),

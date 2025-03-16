@@ -72,7 +72,7 @@ pub fn writeInst(
 }
 
 pub fn dump(pt: Zcu.PerThread, air: Air, liveness: ?Liveness, function_name: []const u8) void {
-    // write(std.io.getStdErr().writer(), pt, air, liveness); // FIXME(pwr): reenable.
+    write(std.io.getStdErr().writer(), pt, air, liveness);
     dumpBinaryAir(pt, air, liveness, function_name) catch std.log.err("failed exporting binary AIR data for function: {s}", .{function_name});
 }
 

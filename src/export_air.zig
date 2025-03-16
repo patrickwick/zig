@@ -5,11 +5,11 @@ const builtin = @import("builtin");
 
 pub const Air = @import("Air.zig");
 const Compilation = @import("Compilation.zig");
-const InternPool = @import("InternPool.zig");
-const Liveness = @import("Liveness.zig");
+pub const InternPool = @import("InternPool.zig");
+pub const Liveness = @import("Liveness.zig");
 const Package = @import("Package.zig");
-const Type = @import("Type.zig");
-const Value = @import("Value.zig");
+pub const Type = @import("Type.zig");
+pub const Value = @import("Value.zig");
 const Zcu = @import("Zcu.zig");
 
 pub const DEFAULT_BINARY_AIR_PATH = "air_export.air.bin";
