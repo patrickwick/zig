@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const air_lib = @import("air");
+const Air = air_lib.Air;
 
 /// Simple PoC to demonstrate:
 /// * importing the binary AIR representation emittted while compiling a program.
@@ -155,30 +156,57 @@ pub fn main() !void {
         // TODO(pwr): extract to a writer in air.zig
         const Helpers = struct {
             // Highest bit indicates if it's an AIR instruction index or intern pool reference.
-            fn isInstructionReference(ref: air_lib.Air.Inst.Ref) bool {
+            fn isInstructionReference(ref: Air.Inst.Ref) bool {
                 return @as(u1, @intCast(@intFromEnum(ref) >> 31)) == 1;
             }
 
             // Some instructions (e.g. dbg_var_ptr using pl_op) contain a payload index into extra data for variable length strings.
             fn derefStringPayload(air: *const air_lib.Air, index: usize) []const u8 {
                 // TODO: use Air.extraData(air: Air, comptime T: type, index: usize) struct { data: T, end: usize }
-                const name: air_lib.Air.NullTerminatedString = @enumFromInt(index);
+                const name: Air.NullTerminatedString = @enumFromInt(index);
                 return name.toSlice(air.*); // TODO(pwr): format escapes.
             }
 
-            fn writeInstructionHeader(writer: anytype, index: air_lib.Air.Inst.Index, unused: bool, tag: air_lib.Air.Inst.Tag) !void {
+            fn writeInstructionHeader(writer: anytype, index: Air.Inst.Index, unused: bool, tag: Air.Inst.Tag) !void {
                 const unused_indicator: u8 = if (unused) '!' else ' ';
                 try writer.print("{}{c}= {s}", .{ index, unused_indicator, @tagName(tag) });
             }
 
-            fn writePayloadOperand(writer: anytype, air: *const air_lib.Air, payload_operand: anytype) !void {
-                const is_instruction_ref = @This().isInstructionReference(payload_operand.operand);
-                const ref_display = if (is_instruction_ref) @as(u31, @truncate(@intFromEnum(payload_operand.operand))) else @intFromEnum(payload_operand.operand);
-                const payload_display = @This().derefStringPayload(air, @intCast(payload_operand.payload));
+            fn writeOperand(writer: anytype, import: *const air_lib.AirImported, operand: Air.Inst.Ref) !void {
+                const is_instruction_ref = @This().isInstructionReference(operand);
+                const ref_display = if (is_instruction_ref) @as(u31, @truncate(@intFromEnum(operand))) else @intFromEnum(operand);
+                // try writer.print("{s}{}", .{ if (is_instruction_ref) "%" else "", ref_display });
 
-                try writer.print("({s}{}, \"{s}\")", .{ if (is_instruction_ref) "%" else "", ref_display, payload_display });
+                if (@intFromEnum(operand) < air_lib.InternPool.static_len) {
+                    try writer.print("@{}", .{operand});
+                } else if (operand.toInterned()) |ip_index| {
+                    // TODO(pwr): this requires InterPool data that is not exported yet
+                    try writer.print("TODO: interned {}", .{operand});
+                    _ = ip_index;
+                    // const pt = w.pt;
+                    // const ty = Type.fromInterned(pt.zcu.intern_pool.indexToKey(ip_index).typeOf());
+                    // try s.print("<{}, {}>", .{
+                    //     ty.fmt(pt),
+                    //     Value.fromInterned(ip_index).fmtValue(pt),
+                    // });
+                } else {
+                    // instruction index
+                    const op_unused = import.liveness.?.isUnused(operand.toIndex().?);
+                    const unused_indicator: u8 = if (op_unused) '!' else ' ';
+                    try writer.print("{c}{s}{}", .{ unused_indicator, if (is_instruction_ref) "%" else "", ref_display });
+                }
+            }
+
+            fn writeOperandAndPayload(writer: anytype, import: *const air_lib.AirImported, payload_operand: anytype) !void {
+                try writer.writeByte('('); // TODO(pwr): write brackets outside in tag
+                try @This().writeOperand(writer, import, payload_operand.operand);
+
+                const payload_display = @This().derefStringPayload(&import.air, @intCast(payload_operand.payload));
+                try writer.print(", \"{s}\")", .{payload_display});
             }
         };
+
+        // TODO(pwr): add indentation state
 
         const tags = air_import.instructions_owned.items(.tag);
         const data = air_import.instructions_owned.items(.data);
@@ -194,16 +222,32 @@ pub fn main() !void {
             // NOTE: see Air.Inst.Tag for documentation on the mapping.
             switch (tag) {
                 .atomic_rmw,
-                .call, // %33!= call(<fn () noreturn, (function 'divideByZero')>, [])
-                .call_always_tail,
-                .call_never_tail,
-                .call_never_inline,
                 .cond_br,
                 .loop_switch_br,
                 .select,
                 .switch_br,
                 .@"try",
-                => try Helpers.writePayloadOperand(out, &air_import.air, variant.pl_op),
+                => try Helpers.writeOperandAndPayload(out, &air_import, variant.pl_op),
+
+                .call, // %33!= call(<fn () noreturn, (function 'divideByZero')>, [])
+                .call_always_tail,
+                .call_never_tail,
+                .call_never_inline,
+                => {
+                    const payload_operand = variant.pl_op;
+                    const extra = air_import.air.extraData(Air.Call, payload_operand.payload);
+                    const arguments = @as([]const Air.Inst.Ref, @ptrCast(air_import.air.extra[extra.end..][0..extra.data.args_len]));
+
+                    try out.writeByte('(');
+                    defer out.writeByte(')') catch {};
+                    try Helpers.writeOperand(out, &air_import, payload_operand.operand);
+                    try out.writeAll(", [");
+                    defer out.writeAll("]") catch {};
+                    for (arguments, 0..) |arg, arg_i| {
+                        if (arg_i != 0) try out.writeAll(", ");
+                        try Helpers.writeOperand(out, &air_import, arg);
+                    }
+                },
 
                 .dbg_stmt => { // %40!= dbg_stmt(5:17)
                     const debug_statement = variant.dbg_stmt;
@@ -213,7 +257,7 @@ pub fn main() !void {
                 .dbg_var_ptr, // %4!= dbg_var_ptr(%2, "a")
                 .dbg_var_val, // %39!= dbg_var_val(%38, "b")
                 .dbg_arg_inline,
-                => try Helpers.writePayloadOperand(out, &air_import.air, variant.pl_op),
+                => try Helpers.writeOperandAndPayload(out, &air_import, variant.pl_op),
 
                 .store, .store_safe => {
                     const binary_operation = variant.bin_op;

@@ -71,17 +71,6 @@ pub fn exportAir(writer: std.io.AnyWriter, zcu_per_thread: Zcu.PerThread, air: A
     try writer.writeAll(@ptrCast(air.extra));
     try alignWriter(writer, air.extra.len * @sizeOf(@TypeOf(air.extra[0])), AirHeader.TARGET_ALIGNMENT);
 
-    // TODO: dump InternPool: AIR instructions contain indexes to entries in Data.bin_op, Data.ty, etc.
-    // Store the entire pool or iterate the instructions to store dereferenced values? There are helpers like `Air.value` for it.
-    var intern_pool = zcu_per_thread.zcu.intern_pool;
-    const ip_local = intern_pool.getLocal(zcu_per_thread.tid);
-    const ip_shared = intern_pool.getLocalShared(zcu_per_thread.tid);
-    _ = ip_local;
-    _ = ip_shared;
-    // std.log.err("Local: {any}", .{ip_local});
-    // std.log.err("Local shared: {any}", .{ip_shared});
-
-    // TODO: dump liveness
     if (liveness) |l| {
         try writer.writeAll(@ptrCast(l.tomb_bits));
         try alignWriter(writer, l.tomb_bits.len * @sizeOf(@TypeOf(l.tomb_bits[0])), AirHeader.TARGET_ALIGNMENT);
@@ -89,33 +78,43 @@ pub fn exportAir(writer: std.io.AnyWriter, zcu_per_thread: Zcu.PerThread, air: A
         try writer.writeAll(@ptrCast(l.extra));
         try alignWriter(writer, l.extra.len * @sizeOf(@TypeOf(l.extra[0])), AirHeader.TARGET_ALIGNMENT);
 
-        // TODO: serialize hashmap or just drop special?
+        // TODO(pwr): serialize hashmap or just drop special?
         // => how important is this data for analysis? Can the Liveness lookups handle missing special data?
         // try writer.writeAll(l.special);
         // try alignWriter(writer, l.special.len * @sizeOf(@TypeOf(l.special[0])), AirHeader.TARGET_ALIGNMENT);
     }
 
-    // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    // defer gpa.deinit();
+    // TODO(pwr): dump InternPool: AIR instructions contain indexes to entries in Data.bin_op, Data.ty, etc.
+    // Store the entire pool or iterate the instructions to store dereferenced values? There are helpers like `Air.value` for it.
+    {
+        var intern_pool = zcu_per_thread.zcu.intern_pool;
+        const ip_local = intern_pool.getLocal(zcu_per_thread.tid);
+        const ip_shared = intern_pool.getLocalShared(zcu_per_thread.tid);
+        _ = ip_local;
+        _ = ip_shared;
 
-    // var arena = std.heap.ArenaAllocator.init(gpa.allocator());
-    // defer arena.deinit();
-    // const arena_allocator = arena.allocator();
+        // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        // defer gpa.deinit();
 
-    // const extra = ip_local.getMutableExtra(arena_allocator);
-    // const extra_tags = extra.view().items(.file);
-    // const extra_inst = extra.view().items(.inst);
-    // try writer.writeAll(extra_tags);
-    // // try alignWriter(writer, air.extra.len * @sizeOf(@TypeOf(air.extra[0])), AirHeader.TARGET_ALIGNMENT);
-    // try writer.writeAll(extra_inst);
-    // // try alignWriter(writer, air.extra.len * @sizeOf(@TypeOf(air.extra[0])), AirHeader.TARGET_ALIGNMENT);
+        // var arena = std.heap.ArenaAllocator.init(gpa.allocator());
+        // defer arena.deinit();
+        // const arena_allocator = arena.allocator();
+
+        // const extra = ip_local.getMutableExtra(arena_allocator);
+        // const extra_tags = extra.view().items(.file);
+        // const extra_inst = extra.view().items(.inst);
+        // try writer.writeAll(extra_tags);
+        // // try alignWriter(writer, air.extra.len * @sizeOf(@TypeOf(air.extra[0])), AirHeader.TARGET_ALIGNMENT);
+        // try writer.writeAll(extra_inst);
+        // // try alignWriter(writer, air.extra.len * @sizeOf(@TypeOf(air.extra[0])), AirHeader.TARGET_ALIGNMENT);
+    }
 
     // TODO: how can the ZCU / InternPool dependent instruction information be tranferred?
     // Brute force approach below: expand all types and values ahead of time. This is comparable to `print_air.Writer.writeInst`.
     // => **Is there a better way?**
     // We should leverage that Zig internal data structures don't contain pointers and can be shared without serialization.
     // Compiling the AIR and InternPool code as a dependency in the analysis code is also very fast now with a small API surface that can break (0.14.0).
-    if (false) {
+    if (false) { // FIXME(pwr): remove experiments
         const Print = struct {
             fn printType(pt: Zcu.PerThread, w: anytype, ty: Type) !void {
                 // TODO: inline implementation to understand data required for representation
@@ -510,6 +509,7 @@ pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImp
         };
     };
 
+    // TODO(pwr): import data
     const intern_pool = InternPool.empty;
 
     return .{
