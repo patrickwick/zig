@@ -8,6 +8,9 @@ const air_lib = @import("air");
 /// * detect division by zero as a simple PoC using symbolic execution.
 /// * TODO(pwr): maybe integrate CLR to perform additional checks -> would be nice to know how fast it is.
 pub fn main() !void {
+    const stdout = std.io.getStdOut();
+    const out = stdout.writer();
+
     var gpa = std.heap.GeneralPurposeAllocator(.{
         .safety = true,
         .verbose_log = false,
@@ -53,13 +56,27 @@ pub fn main() !void {
     };
 
     const main_body_indexes = air_import.air.getMainBody();
-    std.log.info(
-        \\AIR function "{s}":
-        \\main body indexes: {any}
-        \\{any}
-    , .{ air_import.function_name, main_body_indexes, air_import.air });
-
     const liveness = air_import.liveness orelse @panic("Liveness is required");
+
+    try out.print(
+        \\# Begin Function AIR: {s}:
+        \\# Total AIR+Liveness bytes: {d} bytes
+        \\# AIR Instructions:         {d} entries
+        \\# AIR Extra Data:           {d} entries
+        \\# Liveness tomb_bits:       {d} entries
+        \\# Liveness Extra Data:      {d} entries
+        \\# Liveness special table:   not supported
+        \\# Main body indexes: {any}
+        \\
+    , .{
+        air_import.function_name,
+        air_import.header.total_size_bytes,
+        air_import.header.instruction_count,
+        air_import.header.extra_data_count,
+        liveness.tomb_bits.len,
+        liveness.extra.len,
+        main_body_indexes,
+    });
 
     // Detect division by zero as a simple PoC using symbolic execution.
     //
@@ -152,14 +169,14 @@ pub fn main() !void {
             }
 
             // TODO(pwr): use a writer instead of log and split common header part from individual tags
-            fn logPayloadOperand(air: *const air_lib.Air, index: air_lib.Air.Inst.Index, unused: bool, tag: air_lib.Air.Inst.Tag, payload_operand: anytype) void {
+            fn logPayloadOperand(writer: anytype, air: *const air_lib.Air, index: air_lib.Air.Inst.Index, unused: bool, tag: air_lib.Air.Inst.Tag, payload_operand: anytype) !void {
                 const tag_name = @tagName(tag);
                 const is_instruction_ref = @This().isInstructionReference(payload_operand.operand);
                 const ref_display = if (is_instruction_ref) @as(u31, @truncate(@intFromEnum(payload_operand.operand))) else @intFromEnum(payload_operand.operand);
                 const payload_display = @This().derefStringPayload(air, @intCast(payload_operand.payload));
                 const unused_indicator: u8 = if (unused) '!' else ' ';
 
-                std.log.info(tag_format ++ "{s}{}, \"{s}\")", .{
+                try writer.print(tag_format ++ "{s}{}, \"{s}\")\n", .{
                     index,
                     unused_indicator,
                     tag_name,
@@ -193,12 +210,11 @@ pub fn main() !void {
                 .select,
                 .switch_br,
                 .@"try",
-                => Helpers.logPayloadOperand(&air_import.air, instruction_index, unused, tag, variant.pl_op),
+                => try Helpers.logPayloadOperand(out, &air_import.air, instruction_index, unused, tag, variant.pl_op),
 
                 .dbg_stmt => { // %40!= dbg_stmt(5:17)
-                    // TODO(pwr): try calling print_air.zig (writeDbgVar) directly.
                     const debug_statement = variant.dbg_stmt;
-                    std.log.info(tag_format ++ "{}:{})", .{
+                    try out.print(tag_format ++ "{}:{})\n", .{
                         instruction_index,
                         unused_indicator,
                         tag_name,
@@ -210,27 +226,27 @@ pub fn main() !void {
                 .dbg_var_ptr, // %4!= dbg_var_ptr(%2, "a")
                 .dbg_var_val, // %39!= dbg_var_val(%38, "b")
                 .dbg_arg_inline,
-                => Helpers.logPayloadOperand(&air_import.air, instruction_index, unused, tag, variant.pl_op),
+                => try Helpers.logPayloadOperand(out, &air_import.air, instruction_index, unused, tag, variant.pl_op),
 
                 .store, .store_safe => {
                     const binary_operation = variant.bin_op;
-                    std.log.info(tag_format ++ ") # {}", .{ instruction_index, unused_indicator, tag_name, binary_operation });
+                    try out.print(tag_format ++ ") # {}\n", .{ instruction_index, unused_indicator, tag_name, binary_operation });
                 },
                 .load => {
                     const type_operand = variant.ty_op;
-                    std.log.info(tag_format ++ ") # {}", .{ instruction_index, unused_indicator, tag_name, type_operand });
+                    try out.print(tag_format ++ ") # {}\n", .{ instruction_index, unused_indicator, tag_name, type_operand });
                 },
                 .mul_with_overflow => {
                     const type_payload = variant.ty_pl;
-                    std.log.info(tag_format ++ ") # {}", .{ instruction_index, unused_indicator, tag_name, type_payload });
+                    try out.print(tag_format ++ ") # {}\n", .{ instruction_index, unused_indicator, tag_name, type_payload });
                 },
                 .sub_with_overflow => {
                     const type_payload = variant.ty_pl;
-                    std.log.info(tag_format ++ ") # {}", .{ instruction_index, unused_indicator, tag_name, type_payload });
+                    try out.print(tag_format ++ ") # {}\n", .{ instruction_index, unused_indicator, tag_name, type_payload });
                 },
                 .div_trunc => {
                     const binary_operation = variant.bin_op;
-                    std.log.info(tag_format ++ ") # {}", .{ instruction_index, unused_indicator, tag_name, binary_operation });
+                    try out.print(tag_format ++ ") # {}\n", .{ instruction_index, unused_indicator, tag_name, binary_operation });
                 },
                 .ret_safe => {
                     const unary_operation = variant.un_op;
@@ -245,10 +261,10 @@ pub fn main() !void {
                         break :value air_lib.Value{ .ip_index = type_value.ip_index };
                     };
 
-                    std.log.info(tag_format ++ "@{any} - {any})", .{ instruction_index, unused_indicator, tag_name, unary_operation, value.ip_index });
+                    try out.print(tag_format ++ "@{any} - {any})\n", .{ instruction_index, unused_indicator, tag_name, unary_operation, value.ip_index });
                 },
                 // TODO(pwr): implement all instructions.
-                else => std.log.info(tag_format ++ ")", .{ instruction_index, unused_indicator, tag_name }),
+                else => try out.print(tag_format ++ ")\n", .{ instruction_index, unused_indicator, tag_name }),
             }
         }
     }
