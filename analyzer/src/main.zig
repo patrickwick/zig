@@ -2,6 +2,11 @@ const std = @import("std");
 
 const air_lib = @import("air");
 
+/// Simple PoC to demonstrate:
+/// * importing the binary AIR representation emittted while compiling a program.
+/// * using imported AIR to create the same debug output as --verbose-air provides within the compiler.
+/// * detect division by zero as a simple PoC using symbolic execution.
+/// * TODO(pwr): maybe integrate CLR to perform additional checks -> would be nice to know how fast it is.
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{
         .safety = true,
@@ -130,6 +135,8 @@ pub fn main() !void {
         // TODO(pwr): how can identifiers be traced back? Using only the `dbg_x` instructions?
         // * Is any additional information required or does the fully qualified name, source code and AIR suffice?
 
+        const tag_format = "{}{c}= {s}(";
+
         // TODO(pwr): extract to air.zig
         const Helpers = struct {
             // Highest bit indicates if it's an AIR instruction index or intern pool reference.
@@ -137,14 +144,29 @@ pub fn main() !void {
                 return @as(u1, @intCast(@intFromEnum(ref) >> 31)) == 1;
             }
 
-            // Dereference payload data from extra.
-            // Some instruction types (e.g. pl_op) use a payload index into extra data for variable length data.
-            fn derefPayload(payload: u32, extra: []const u32) []const u8 {
-                const end = for (payload..extra.len) |i| {
-                    if (extra[i] == 0) break i;
-                } else extra.len;
-                const extra_slice = extra[payload..end];
-                return @ptrCast(extra_slice);
+            // Some instructions (e.g. dbg_var_ptr using pl_op) contain a payload index into extra data for variable length strings.
+            fn derefStringPayload(air: *const air_lib.Air, index: usize) []const u8 {
+                // TODO: use Air.extraData(air: Air, comptime T: type, index: usize) struct { data: T, end: usize }
+                const name: air_lib.Air.NullTerminatedString = @enumFromInt(index);
+                return name.toSlice(air.*); // TODO(pwr): format escapes.
+            }
+
+            // TODO(pwr): use a writer instead of log and split common header part from individual tags
+            fn logPayloadOperand(air: *const air_lib.Air, index: air_lib.Air.Inst.Index, unused: bool, tag: air_lib.Air.Inst.Tag, payload_operand: anytype) void {
+                const tag_name = @tagName(tag);
+                const is_instruction_ref = @This().isInstructionReference(payload_operand.operand);
+                const ref_display = if (is_instruction_ref) @as(u31, @truncate(@intFromEnum(payload_operand.operand))) else @intFromEnum(payload_operand.operand);
+                const payload_display = @This().derefStringPayload(air, @intCast(payload_operand.payload));
+                const unused_indicator: u8 = if (unused) '!' else ' ';
+
+                std.log.info(tag_format ++ "{s}{}, \"{s}\")", .{
+                    index,
+                    unused_indicator,
+                    tag_name,
+                    if (is_instruction_ref) "%" else "",
+                    ref_display,
+                    payload_display,
+                });
             }
         };
 
@@ -157,36 +179,39 @@ pub fn main() !void {
             const unused = liveness.isUnused(instruction_index);
             const unused_indicator: u8 = if (unused) '!' else ' ';
 
-            const tag_format = "{}{c}= {s}(";
             const tag_name = @tagName(tag);
 
             // NOTE: see Air.Inst.Tag for documentation on the mapping.
             switch (tag) {
-                .dbg_stmt => {
+                .atomic_rmw,
+                .call, // %33!= call(<fn () noreturn, (function 'divideByZero')>, [])
+                .call_always_tail,
+                .call_never_tail,
+                .call_never_inline,
+                .cond_br,
+                .loop_switch_br,
+                .select,
+                .switch_br,
+                .@"try",
+                => Helpers.logPayloadOperand(&air_import.air, instruction_index, unused, tag, variant.pl_op),
+
+                .dbg_stmt => { // %40!= dbg_stmt(5:17)
+                    // TODO(pwr): try calling print_air.zig (writeDbgVar) directly.
                     const debug_statement = variant.dbg_stmt;
-                    std.log.info(tag_format ++ ") # {}", .{ instruction_index, unused_indicator, tag_name, debug_statement });
-                },
-                // %4!= dbg_var_ptr(%2, "a")
-                .dbg_var_ptr => {
-                    const payload_operand = variant.pl_op;
-
-                    const is_instruction_ref = Helpers.isInstructionReference(payload_operand.operand);
-                    const ref_display = if (is_instruction_ref) @as(u31, @truncate(@intFromEnum(payload_operand.operand))) else @intFromEnum(payload_operand.operand);
-                    const payload_display = Helpers.derefPayload(payload_operand.payload, air_import.air.extra);
-
-                    std.log.info(tag_format ++ "{s}{}, \"{s}\")", .{
+                    std.log.info(tag_format ++ "{}:{})", .{
                         instruction_index,
                         unused_indicator,
                         tag_name,
-                        if (is_instruction_ref) "%" else "",
-                        ref_display,
-                        payload_display,
+                        debug_statement.line,
+                        debug_statement.column,
                     });
                 },
-                .dbg_var_val => {
-                    const payload_operand = variant.pl_op;
-                    std.log.info(tag_format ++ ") # {}", .{ instruction_index, unused_indicator, tag_name, payload_operand });
-                },
+
+                .dbg_var_ptr, // %4!= dbg_var_ptr(%2, "a")
+                .dbg_var_val, // %39!= dbg_var_val(%38, "b")
+                .dbg_arg_inline,
+                => Helpers.logPayloadOperand(&air_import.air, instruction_index, unused, tag, variant.pl_op),
+
                 .store, .store_safe => {
                     const binary_operation = variant.bin_op;
                     std.log.info(tag_format ++ ") # {}", .{ instruction_index, unused_indicator, tag_name, binary_operation });
