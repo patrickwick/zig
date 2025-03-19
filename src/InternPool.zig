@@ -1024,7 +1024,7 @@ pub const DepEntry = extern struct {
     };
 };
 
-const Local = struct {
+pub const Local = struct {
     /// These fields can be accessed from any thread by calling `acquire`.
     /// They are only modified by the owning thread.
     shared: Shared align(std.atomic.cache_line),
@@ -1097,7 +1097,7 @@ const Local = struct {
         mutex: std.Thread.Mutex,
         len: u32,
 
-        const empty: ListMutate = .{
+        pub const empty: ListMutate = .{
             .mutex = .{},
             .len = 0,
         };
@@ -1110,7 +1110,7 @@ const Local = struct {
 
         const free_list_sentinel = std.math.maxInt(u32);
 
-        const empty: BucketListMutate = .{
+        pub const empty: BucketListMutate = .{
             .last_bucket_len = 0,
             .buckets_list = ListMutate.empty,
             .free_list = free_list_sentinel,
@@ -1333,7 +1333,7 @@ const Local = struct {
                 }
             };
 
-            const empty: ListSelf = .{ .bytes = @constCast(&(extern struct {
+            pub const empty: ListSelf = .{ .bytes = @constCast(&(extern struct {
                 header: Header,
                 bytes: [0]u8 align(@alignOf(Elem)),
             }{

@@ -43,8 +43,15 @@ pub const AirHeader = extern struct {
 
         // intern pool
         var intern_pool = zcu_per_thread.zcu.intern_pool;
-        const ip_local_shared = intern_pool.getLocalShared(.main);
-        const ip_local_shared_slice = ip_local_shared.items.acquire().view().slice();
+
+        // FIXME(pwr): temporarily replaced by mutable items -> are both always needed?
+        // const ip_local_shared = intern_pool.getLocalShared(.main);
+        // const ip_local_shared_slice = ip_local_shared.items.acquire().view().slice();
+
+        // NOTE: failing allocator since we only want to read, not lazily add anything to the intern pool.
+        const gpa = std.testing.failing_allocator;
+        const ip_local_shared = intern_pool.getLocal(.main);
+        const ip_local_shared_slice = ip_local_shared.getMutableItems(gpa).view().slice();
 
         const ipls_tags = ip_local_shared_slice.items(.tag);
         const ipls_data = ip_local_shared_slice.items(.data);
@@ -106,19 +113,45 @@ pub fn exportAir(writer: std.io.AnyWriter, zcu_per_thread: Zcu.PerThread, air: A
         var intern_pool = zcu_per_thread.zcu.intern_pool;
         const ip_local = intern_pool.getLocal(.main);
         const ip_local_shared = intern_pool.getLocalShared(.main);
-        _ = ip_local;
 
-        const ip_local_shared_slice = ip_local_shared.items.acquire().view().slice();
+        // NOTE: failing allocator since we only want to read, not lazily add anything to the intern pool.
+        const gpa = std.testing.failing_allocator;
 
-        const ipls_tags = ip_local_shared_slice.items(.tag);
-        try writer.writeAll(@ptrCast(ipls_tags));
-        const intern_extra_tag_size = ipls_tags.len * @sizeOf(std.meta.FieldType(InternPool.Item, .tag));
-        try alignWriter(writer, intern_extra_tag_size, AirHeader.TARGET_ALIGNMENT);
+        // TODO(pwr): local mutable items
+        {
+            const items = ip_local.getMutableItems(gpa);
+            const ip_local_shared_slice = items.view().slice();
 
-        const ipls_data = ip_local_shared_slice.items(.data);
-        try writer.writeAll(@ptrCast(ipls_data));
-        const intern_extra_inst_size = ipls_data.len * @sizeOf(std.meta.FieldType(InternPool.Item, .data));
-        try alignWriter(writer, intern_extra_inst_size, AirHeader.TARGET_ALIGNMENT);
+            const ipls_tags = ip_local_shared_slice.items(.tag);
+            try writer.writeAll(@ptrCast(ipls_tags));
+            const intern_extra_tag_size = ipls_tags.len * @sizeOf(std.meta.FieldType(InternPool.Item, .tag));
+            try alignWriter(writer, intern_extra_tag_size, AirHeader.TARGET_ALIGNMENT);
+
+            const ipls_data = ip_local_shared_slice.items(.data);
+            try writer.writeAll(@ptrCast(ipls_data));
+            const intern_extra_inst_size = ipls_data.len * @sizeOf(std.meta.FieldType(InternPool.Item, .data));
+            try alignWriter(writer, intern_extra_inst_size, AirHeader.TARGET_ALIGNMENT);
+        }
+
+        // TODO(pwr): local mutable extra
+        {
+            _ = ip_local.getMutableExtra(gpa);
+        }
+
+        // Local shared items
+        if (false) { // FIXME(pwr): temporarily replaced by mutable items -> are both always needed?
+            const ip_local_shared_slice = ip_local_shared.items.acquire().view().slice();
+
+            const ipls_tags = ip_local_shared_slice.items(.tag);
+            try writer.writeAll(@ptrCast(ipls_tags));
+            const intern_extra_tag_size = ipls_tags.len * @sizeOf(std.meta.FieldType(InternPool.Item, .tag));
+            try alignWriter(writer, intern_extra_tag_size, AirHeader.TARGET_ALIGNMENT);
+
+            const ipls_data = ip_local_shared_slice.items(.data);
+            try writer.writeAll(@ptrCast(ipls_data));
+            const intern_extra_inst_size = ipls_data.len * @sizeOf(std.meta.FieldType(InternPool.Item, .data));
+            try alignWriter(writer, intern_extra_inst_size, AirHeader.TARGET_ALIGNMENT);
+        }
     }
 }
 
@@ -233,10 +266,55 @@ pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImp
         try alignReader(reader, ip_data_bytes_read, AirHeader.TARGET_ALIGNMENT);
 
         // reconstruct
-        const ip = InternPool.empty;
+        var ip = InternPool.empty;
 
-        // TODO(pwr): NYI
-        // const ip.getLocalShared(.main).extra.view().setCapacity(allocator, header.extra_data_count)
+        // NOTE(pwr): hardcoded for a single main thread with ID 0.
+        const main = Zcu.PerThread.Id.main;
+        std.debug.assert(@intFromEnum(main) == 0);
+
+        // FIXME(pwr): heap allocate -> pointer is stored in ip.locals
+        var locals = [_]InternPool.Local{
+            .{
+                .shared = .{
+                    .items = .empty, // TODO(pwr): fill from import
+                    .extra = .empty, // TODO(pwr): fill from import
+                    .limbs = .empty,
+                    .strings = .empty,
+                    .tracked_insts = .empty,
+                    .files = .empty,
+                    .maps = .empty,
+                    .navs = .empty,
+                    .comptime_units = .empty,
+                    .namespaces = .empty,
+                },
+                .mutate = .{
+                    .arena = .{},
+                    .items = .empty,
+                    .extra = .empty, // TODO(pwr): fill from import
+                    .limbs = .empty,
+                    .strings = .empty,
+                    .tracked_insts = .empty,
+                    .files = .empty,
+                    .maps = .empty,
+                    .navs = .empty,
+                    .comptime_units = .empty,
+                    .namespaces = .empty,
+                },
+            },
+        };
+        ip.locals = &locals;
+
+        {
+            const local_mutable_items = ip.getLocal(.main).getMutableItems(allocator);
+            // TODO(pwr): append all items from import.
+            try local_mutable_items.append(.{
+                .tag = .int_u32,
+                .data = 123,
+            });
+        }
+
+        // var ipls = ip.getLocalShared(main).extra.view();
+        // try ipls.setCapacity(allocator, header.intern_locals_shared_extra_count);
 
         break :intern_pool ip;
     };
