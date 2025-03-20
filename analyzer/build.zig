@@ -6,13 +6,22 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // NOTE: compiler options required to create a fake Zcu compilation unit.
+    const compiler_options = b.addOptions();
+    compiler_options.addOption(bool, "have_llvm", USE_LLVM);
+    compiler_options.addOption([:0]const u8, "version", "0.15.0");
+    compiler_options.addOption(std.SemanticVersion, "semver", .{ .major = 0, .minor = 15, .patch = 0 });
+    compiler_options.addOption(bool, "enable_tracy", false);
+    compiler_options.addOption(bool, "enable_debug_extensions", true);
+    compiler_options.addOption(bool, "enable_logging", true);
+    const ValueInterpretMode = enum { direct, by_name };
+    compiler_options.addOption(ValueInterpretMode, "value_interpret_mode", .by_name);
+
     const compiler_module = b.createModule(.{
         .root_source_file = b.path("../src/export_air.zig"),
         .target = target,
         .optimize = optimize,
     });
-
-    const compiler_options = b.addOptions();
     compiler_module.addOptions("build_options", compiler_options);
 
     const air_module = b.createModule(.{
@@ -22,6 +31,7 @@ pub fn build(b: *std.Build) void {
     });
     air_module.addImport("compiler", compiler_module);
 
+    // TODO(pwr): use air static library instead of module directly to make compilation faster (caching the static lib).
     const exe_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,

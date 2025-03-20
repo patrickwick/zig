@@ -8,7 +8,9 @@ pub const AirImported = compiler.AirImported;
 pub const InternPool = compiler.InternPool;
 pub const Liveness = compiler.Liveness;
 pub const Value = compiler.Value;
+pub const TestCompilationUnit = compiler.TestCompilationUnit;
 pub const Type = compiler.Type;
+pub const Zcu = compiler.Zcu;
 
 pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !compiler.AirImported {
     return try compiler.importAir(allocator, reader);

@@ -10,7 +10,7 @@ pub const Liveness = @import("Liveness.zig");
 const Package = @import("Package.zig");
 pub const Type = @import("Type.zig");
 pub const Value = @import("Value.zig");
-const Zcu = @import("Zcu.zig");
+pub const Zcu = @import("Zcu.zig");
 
 pub const DEFAULT_BINARY_AIR_PATH = "air_export.air.bin";
 
@@ -362,7 +362,7 @@ const t = std.testing;
 
 // Create a test compilation unit for testing without source files. Zcu stores the InternPool which is used in AIR.
 // Zcu unit holds a pointer to Compilation, so it cannot be created on its own (without null pointer hacks).
-const TestCompilationUnit = struct {
+pub const TestCompilationUnit = struct {
     compilation: *Compilation,
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,

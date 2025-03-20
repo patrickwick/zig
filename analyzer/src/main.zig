@@ -3,6 +3,16 @@ const std = @import("std");
 const air_lib = @import("air");
 const Air = air_lib.Air;
 
+// pub const Options = struct {
+//     version: i32,
+//     have_llvm: bool,
+// };
+//
+// pub const options = Options{
+//     .version = 123,
+//     .have_llvm = false,
+// };
+
 /// Simple PoC to demonstrate:
 /// * importing the binary AIR representation emittted while compiling a program.
 /// * using imported AIR to create the same debug output as --verbose-air provides within the compiler.
@@ -173,7 +183,7 @@ pub fn main() !void {
                 try writer.print("{}{c}= {s}", .{ index, unused_indicator, @tagName(tag) });
             }
 
-            fn writeOperand(writer: anytype, import: *const air_lib.AirImported, operand: Air.Inst.Ref) !void {
+            fn writeOperand(writer: anytype, import: *const air_lib.AirImported, operand: Air.Inst.Ref, pt: air_lib.Zcu.PerThread) !void {
                 const is_instruction_ref = @This().isInstructionReference(operand);
                 const ref_display = if (is_instruction_ref) @as(u31, @truncate(@intFromEnum(operand))) else @intFromEnum(operand);
                 // try writer.print("{s}{}", .{ if (is_instruction_ref) "%" else "", ref_display });
@@ -184,13 +194,8 @@ pub fn main() !void {
                     const ty = air_lib.Type.fromInterned(import.intern_pool.indexToKey(ip_index).typeOf());
                     const value = air_lib.Value.fromInterned(ip_index);
 
-                    // TODO(pwr): extract data from imported intern pool
-                    try writer.print("TODO: interned {}={}", .{ ty.fmtDebug(), value.fmtDebug() });
-
-                    // try writer.print("<{}, {}>", .{
-                    //     ty.fmt(pt),
-                    //     Value.fromInterned(ip_index).fmtValue(pt),
-                    // });
+                    // TODO(pwr): extract data from imported intern pool, so this succeeds:
+                    try writer.print("<{}, {}>", .{ ty.fmt(pt), value.fmtValue(pt) });
                 } else {
                     // instruction index
                     const op_unused = import.liveness.?.isUnused(operand.toIndex().?);
@@ -199,14 +204,20 @@ pub fn main() !void {
                 }
             }
 
-            fn writeOperandAndPayload(writer: anytype, import: *const air_lib.AirImported, payload_operand: anytype) !void {
+            fn writeOperandAndPayload(writer: anytype, import: *const air_lib.AirImported, payload_operand: anytype, pt: air_lib.Zcu.PerThread) !void {
                 try writer.writeByte('('); // TODO(pwr): write brackets outside in tag
-                try @This().writeOperand(writer, import, payload_operand.operand);
+                try @This().writeOperand(writer, import, payload_operand.operand, pt);
 
                 const payload_display = @This().derefStringPayload(&import.air, @intCast(payload_operand.payload));
                 try writer.print(", \"{s}\")", .{payload_display});
             }
         };
+
+        // Fake compilation unit with imported intern pool to use compiler APIs.
+        var zcu_fake = try air_lib.TestCompilationUnit.init(arena_allocator);
+        defer zcu_fake.deinit();
+        const zcu: *air_lib.Zcu = zcu_fake.compilation.zcu.?;
+        const zcu_main_thread = air_lib.Zcu.PerThread{ .zcu = zcu, .tid = .main };
 
         // TODO(pwr): add indentation state
 
@@ -229,7 +240,7 @@ pub fn main() !void {
                 .select,
                 .switch_br,
                 .@"try",
-                => try Helpers.writeOperandAndPayload(out, &air_import, variant.pl_op),
+                => try Helpers.writeOperandAndPayload(out, &air_import, variant.pl_op, zcu_main_thread),
 
                 .call, // %33!= call(<fn () noreturn, (function 'divideByZero')>, [])
                 .call_always_tail,
@@ -242,12 +253,12 @@ pub fn main() !void {
 
                     try out.writeByte('(');
                     defer out.writeByte(')') catch {};
-                    try Helpers.writeOperand(out, &air_import, payload_operand.operand);
+                    try Helpers.writeOperand(out, &air_import, payload_operand.operand, zcu_main_thread);
                     try out.writeAll(", [");
                     defer out.writeAll("]") catch {};
                     for (arguments, 0..) |arg, arg_i| {
                         if (arg_i != 0) try out.writeAll(", ");
-                        try Helpers.writeOperand(out, &air_import, arg);
+                        try Helpers.writeOperand(out, &air_import, arg, zcu_main_thread);
                     }
                 },
 
@@ -259,7 +270,7 @@ pub fn main() !void {
                 .dbg_var_ptr, // %4!= dbg_var_ptr(%2, "a")
                 .dbg_var_val, // %39!= dbg_var_val(%38, "b")
                 .dbg_arg_inline,
-                => try Helpers.writeOperandAndPayload(out, &air_import, variant.pl_op),
+                => try Helpers.writeOperandAndPayload(out, &air_import, variant.pl_op, zcu_main_thread),
 
                 .store, .store_safe => {
                     const binary_operation = variant.bin_op;
