@@ -181,12 +181,13 @@ pub fn main() !void {
                 if (@intFromEnum(operand) < air_lib.InternPool.static_len) {
                     try writer.print("@{}", .{operand});
                 } else if (operand.toInterned()) |ip_index| {
-                    // TODO(pwr): this requires InterPool data that is not exported yet
-                    try writer.print("TODO: interned {}", .{operand});
-                    _ = ip_index;
-                    // const pt = w.pt;
-                    // const ty = Type.fromInterned(pt.zcu.intern_pool.indexToKey(ip_index).typeOf());
-                    // try s.print("<{}, {}>", .{
+                    const ty = air_lib.Type.fromInterned(import.intern_pool.indexToKey(ip_index).typeOf());
+                    const value = air_lib.Value.fromInterned(ip_index);
+
+                    // TODO(pwr): extract data from imported intern pool
+                    try writer.print("TODO: interned {}={}", .{ ty.fmtDebug(), value.fmtDebug() });
+
+                    // try writer.print("<{}, {}>", .{
                     //     ty.fmt(pt),
                     //     Value.fromInterned(ip_index).fmtValue(pt),
                     // });

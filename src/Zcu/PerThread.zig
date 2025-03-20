@@ -12,6 +12,7 @@ const build_options = @import("build_options");
 const builtin = @import("builtin");
 const Cache = std.Build.Cache;
 const dev = @import("../dev.zig");
+const export_air = @import("../export_air.zig");
 const InternPool = @import("../InternPool.zig");
 const AnalUnit = InternPool.AnalUnit;
 const isUpDir = @import("../introspect.zig").isUpDir;
@@ -1664,16 +1665,13 @@ pub fn linkerUpdateFunc(pt: Zcu.PerThread, func_index: InternPool.Index, air: Ai
     var liveness = try Liveness.analyze(gpa, air, ip);
     defer liveness.deinit(gpa);
 
+    const function_name = nav.fqn.toSlice(&zcu.intern_pool);
+    export_air.exportAir(pt, air, liveness, function_name);
+
     if (build_options.enable_debug_extensions and comp.verbose_air) {
-        const function_name = nav.fqn.toSlice(&zcu.intern_pool);
-
-        if (false) { // FIXME(pwr): reenable
-            std.debug.print("# Begin Function AIR: {s}:\n", .{function_name});
-            @import("../print_air.zig").dump(pt, air, liveness);
-            std.debug.print("# End Function AIR: {s}\n\n", .{function_name});
-        }
-
-        @import("../export_air.zig").exportAir(pt, air, liveness, function_name);
+        std.debug.print("# Begin Function AIR: {s}:\n", .{function_name});
+        @import("../print_air.zig").dump(pt, air, liveness);
+        std.debug.print("# End Function AIR: {s}\n\n", .{function_name});
     }
 
     if (std.debug.runtime_safety) {
