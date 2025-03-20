@@ -23,6 +23,7 @@ pub const AirHeader = extern struct {
     pub const MAGIC = 0x21504d5544524941; // "AIRDUMP!" in hex
 
     magic: u64 = MAGIC,
+    // TODO(pwr): add version field
     total_size_bytes: u64,
     function_name_length: u64, // in bytes
     instruction_count: u64, // in entries, not bytes
@@ -33,6 +34,9 @@ pub const AirHeader = extern struct {
 
     intern_local_item_count: u64, // in entries, not bytes
     intern_local_extra_count: u64, // in entries, not bytes
+
+    intern_local_shared_item_count: u64, // in entries, not bytes
+    intern_local_shared_extra_count: u64, // in entries, not bytes
 
     pub fn init(air: Air, liveness: ?Liveness, zcu_per_thread: Zcu.PerThread, function_name: []const u8) @This() {
         var total_size: u64 = 0;
@@ -63,9 +67,9 @@ pub const AirHeader = extern struct {
         const ip_local = intern_pool.getLocal(.main);
 
         const item_count = count: {
-            const ip_local_item_slice = ip_local.getMutableItems(gpa).view().slice();
-            const tags = ip_local_item_slice.items(.tag);
-            const data = ip_local_item_slice.items(.data);
+            const item_slice = ip_local.getMutableItems(gpa).view().slice();
+            const tags = item_slice.items(.tag);
+            const data = item_slice.items(.data);
             std.debug.assert(tags.len == data.len); // single length for MultiArrayList
 
             const local_tag_size = std.mem.alignForward(usize, tags.len * @sizeOf(@TypeOf(tags[0])), TARGET_ALIGNMENT);
@@ -74,11 +78,37 @@ pub const AirHeader = extern struct {
             const local_data_size = std.mem.alignForward(usize, data.len * @sizeOf(@TypeOf(data[0])), TARGET_ALIGNMENT);
             total_size += local_data_size;
 
-            break :count ip_local_item_slice.len;
+            break :count item_slice.len;
         };
 
         const extra_count = count: {
             const extra = ip_local.getMutableExtra(gpa).view().slice();
+            const extra_data: [*]u32 = @ptrCast(@alignCast(extra.ptrs[0]));
+            const local_extra_size = std.mem.alignForward(usize, extra.len * @sizeOf(@TypeOf(extra_data[0])), TARGET_ALIGNMENT);
+            total_size += local_extra_size;
+
+            break :count extra.len;
+        };
+
+        const ip_local_shared = intern_pool.getLocalShared(.main);
+
+        const shared_item_count = count: {
+            const item_slice = ip_local_shared.items.acquire().view().slice();
+            const tags = item_slice.items(.tag);
+            const data = item_slice.items(.data);
+            std.debug.assert(tags.len == data.len); // single length for MultiArrayList
+
+            const local_tag_size = std.mem.alignForward(usize, tags.len * @sizeOf(@TypeOf(tags[0])), TARGET_ALIGNMENT);
+            total_size += local_tag_size;
+
+            const local_data_size = std.mem.alignForward(usize, data.len * @sizeOf(@TypeOf(data[0])), TARGET_ALIGNMENT);
+            total_size += local_data_size;
+
+            break :count item_slice.len;
+        };
+
+        const shared_extra_count = count: {
+            const extra = ip_local_shared.extra.acquire().view().slice();
             const extra_data: [*]u32 = @ptrCast(@alignCast(extra.ptrs[0]));
             const local_extra_size = std.mem.alignForward(usize, extra.len * @sizeOf(@TypeOf(extra_data[0])), TARGET_ALIGNMENT);
             total_size += local_extra_size;
@@ -95,8 +125,8 @@ pub const AirHeader = extern struct {
             .liveness_extra_count = if (liveness) |l| l.extra.len else 0,
             .intern_local_item_count = item_count,
             .intern_local_extra_count = extra_count,
-            // .intern_local_shared_item_count = item_count,
-            // .intern_local_shared_extra_count = extra_count,
+            .intern_local_shared_item_count = shared_item_count,
+            .intern_local_shared_extra_count = shared_extra_count,
         };
     }
 };
@@ -166,15 +196,14 @@ fn exportAirWriter(writer: anytype, zcu_per_thread: Zcu.PerThread, air: Air, liv
 
         // Local mutable items.
         {
-            const items = ip_local.getMutableItems(gpa);
-            const slice = items.view().slice();
+            const items = ip_local.getMutableItems(gpa).view().slice();
 
-            const tags = slice.items(.tag);
+            const tags = items.items(.tag);
             try writer.writeAll(@ptrCast(tags));
             const tag_size = tags.len * @sizeOf(@TypeOf(tags[0]));
             try alignWriter(writer, tag_size, AirHeader.TARGET_ALIGNMENT);
 
-            const data = slice.items(.data);
+            const data = items.items(.data);
             try writer.writeAll(@ptrCast(data));
             const data_size = data.len * @sizeOf(@TypeOf(data[0]));
             try alignWriter(writer, data_size, AirHeader.TARGET_ALIGNMENT);
@@ -183,25 +212,34 @@ fn exportAirWriter(writer: anytype, zcu_per_thread: Zcu.PerThread, air: Air, liv
         // Local mutable extra.
         {
             const extra = ip_local.getMutableExtra(gpa).view().slice();
-            const extra_data: [*]u32 = @ptrCast(@alignCast(extra.ptrs[0]));
-            try writer.writeAll(@ptrCast(extra_data[0..extra.len]));
-            const extra_size = extra.len * @sizeOf(@TypeOf(extra_data[0]));
+            const extra_data = extra.items(.@"0"); // first anonymous field of type u32.
+            try writer.writeAll(@ptrCast(extra_data));
+            const extra_size = extra_data.len * @sizeOf(@TypeOf(extra_data[0]));
             try alignWriter(writer, extra_size, AirHeader.TARGET_ALIGNMENT);
         }
 
-        // Local shared items.
-        if (false) { // FIXME(pwr): temporarily replaced by mutable items -> are both always needed?
-            const ip_local_shared_slice = ip_local_shared.items.acquire().view().slice();
+        // Local shared mutable items.
+        {
+            const items = ip_local_shared.items.acquire().view().slice();
 
-            const ipls_tags = ip_local_shared_slice.items(.tag);
-            try writer.writeAll(@ptrCast(ipls_tags));
-            const intern_extra_tag_size = ipls_tags.len * @sizeOf(std.meta.FieldType(InternPool.Item, .tag));
-            try alignWriter(writer, intern_extra_tag_size, AirHeader.TARGET_ALIGNMENT);
+            const tags = items.items(.tag);
+            try writer.writeAll(@ptrCast(tags));
+            const tag_size = tags.len * @sizeOf(@TypeOf(tags[0]));
+            try alignWriter(writer, tag_size, AirHeader.TARGET_ALIGNMENT);
 
-            const ipls_data = ip_local_shared_slice.items(.data);
-            try writer.writeAll(@ptrCast(ipls_data));
-            const intern_extra_inst_size = ipls_data.len * @sizeOf(std.meta.FieldType(InternPool.Item, .data));
-            try alignWriter(writer, intern_extra_inst_size, AirHeader.TARGET_ALIGNMENT);
+            const data = items.items(.data);
+            try writer.writeAll(@ptrCast(data));
+            const data_size = data.len * @sizeOf(@TypeOf(data[0]));
+            try alignWriter(writer, data_size, AirHeader.TARGET_ALIGNMENT);
+        }
+
+        // Local shared mutable extra.
+        {
+            const extra = ip_local_shared.extra.acquire().view().slice();
+            const extra_data = extra.items(.@"0"); // first anonymous field of type u32.
+            try writer.writeAll(@ptrCast(extra_data));
+            const extra_size = extra_data.len * @sizeOf(@TypeOf(extra_data[0]));
+            try alignWriter(writer, extra_size, AirHeader.TARGET_ALIGNMENT);
         }
     }
 }
@@ -216,6 +254,8 @@ fn alignReader(reader: anytype, size: usize, comptime target_alignment: usize) !
     try reader.skipBytes(aligned_length - size, .{});
 }
 
+/// Imported AIR.
+/// Header followed by the data in the same order as the counts with fixed alignment defined in the header.
 pub const AirImported = struct {
     header: AirHeader,
     function_name: []const u8,
@@ -237,8 +277,10 @@ pub const AirImported = struct {
 };
 
 // TODO: return optional to indicate end of stream without an error.
+// TODO: require a seekable stream to ensure that the correct bytes are consumed?
 pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImported {
     const header = try reader.readStruct(AirHeader);
+    if (header.magic != AirHeader.MAGIC) return error.InvalidMagicValue;
 
     var instructions = std.MultiArrayList(Air.Inst){};
     errdefer instructions.deinit(allocator);
@@ -290,54 +332,93 @@ pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImp
     };
 
     const intern_pool = intern_pool: {
-        // TODO(pwr): no need to copy -> read and append directly
-        const tags = try allocator.alloc(InternPool.Tag, header.intern_local_item_count);
-        defer allocator.free(tags);
-        const ip_tag_bytes_read = try reader.readAll(@ptrCast(tags));
-        std.debug.assert(ip_tag_bytes_read == header.intern_local_item_count * @sizeOf(InternPool.Tag));
-        try alignReader(reader, ip_tag_bytes_read, AirHeader.TARGET_ALIGNMENT);
-
-        const IpDataType = std.meta.FieldType(InternPool.Item, .data);
-        const data = try allocator.alloc(IpDataType, header.intern_local_item_count);
-        defer allocator.free(data);
-        const ip_data_bytes_read = try reader.readAll(@ptrCast(data));
-        std.debug.assert(ip_data_bytes_read == header.intern_local_item_count * @sizeOf(IpDataType));
-        try alignReader(reader, ip_data_bytes_read, AirHeader.TARGET_ALIGNMENT);
-
-        const local_extra = try allocator.alloc(u32, header.intern_local_extra_count);
-        defer allocator.free(local_extra);
-        const local_extra_bytes_read = try reader.readAll(@ptrCast(local_extra));
-        std.debug.assert(local_extra_bytes_read == header.intern_local_extra_count * @sizeOf(@TypeOf(local_extra[0])));
-        try alignReader(reader, local_extra_bytes_read, AirHeader.TARGET_ALIGNMENT);
-
         // NOTE(pwr): hardcoded for a single main thread with ID 0.
-        const main = Zcu.PerThread.Id.main;
+        const thread_id = Zcu.PerThread.Id.main;
         const thread_count = 1;
-        std.debug.assert(@intFromEnum(main) == 0);
+        std.debug.assert(@intFromEnum(thread_id) == 0);
 
-        // reconstruct
+        // InternPool to reconstruct.
         var ip = InternPool.empty;
         try ip.init(allocator, thread_count);
 
-        const local = ip.getLocal(.main);
+        // Local.
         {
-            const local_mutable_items = local.getMutableItems(allocator);
-            try local_mutable_items.ensureUnusedCapacity(tags.len);
-            for (tags, data) |tag, variant| local_mutable_items.appendAssumeCapacity(.{ .tag = tag, .data = variant });
+            const local = ip.getLocal(thread_id);
+            const item_count = header.intern_local_item_count;
+            const extra_count = header.intern_local_extra_count;
+
+            // TODO(pwr): no need to copy -> read and append directly
+            const tags = try allocator.alloc(InternPool.Tag, item_count);
+            defer allocator.free(tags);
+            const local_tag_bytes_read = try reader.readAll(@ptrCast(tags));
+            std.debug.assert(local_tag_bytes_read == item_count * @sizeOf(InternPool.Tag));
+            try alignReader(reader, local_tag_bytes_read, AirHeader.TARGET_ALIGNMENT);
+
+            const IpDataType = std.meta.FieldType(InternPool.Item, .data);
+            const data = try allocator.alloc(IpDataType, item_count);
+            defer allocator.free(data);
+            const local_data_bytes_read = try reader.readAll(@ptrCast(data));
+            std.debug.assert(local_data_bytes_read == item_count * @sizeOf(IpDataType));
+            try alignReader(reader, local_data_bytes_read, AirHeader.TARGET_ALIGNMENT);
+
+            const local_extra = try allocator.alloc(u32, extra_count);
+            defer allocator.free(local_extra);
+            const local_extra_bytes_read = try reader.readAll(@ptrCast(local_extra));
+            std.debug.assert(local_extra_bytes_read == extra_count * @sizeOf(@TypeOf(local_extra[0])));
+            try alignReader(reader, local_extra_bytes_read, AirHeader.TARGET_ALIGNMENT);
+
+            {
+                const local_mutable_items = local.getMutableItems(allocator);
+                try local_mutable_items.ensureUnusedCapacity(tags.len);
+                for (tags, data) |tag, variant| local_mutable_items.appendAssumeCapacity(.{ .tag = tag, .data = variant });
+            }
+
+            {
+                const local_mutable_extra = local.getMutableExtra(allocator);
+                try local_mutable_extra.ensureUnusedCapacity(local_extra.len);
+                for (local_extra) |e| local_mutable_extra.appendAssumeCapacity(.{e});
+            }
         }
 
+        // Local shared.
         {
-            const local_mutable_extra = local.getMutableExtra(allocator);
-            try local_mutable_extra.ensureUnusedCapacity(local_extra.len);
-            for (local_extra) |e| local_mutable_extra.appendAssumeCapacity(.{e});
-        }
+            const local_shared = ip.getLocalShared(thread_id);
+            const item_count = header.intern_local_shared_item_count;
+            const extra_count = header.intern_local_shared_extra_count;
 
-        {
-            // TODO(pwr): local shared append items
-        }
+            // TODO(pwr): no need to copy -> read and append directly
+            const tags = try allocator.alloc(InternPool.Tag, item_count);
+            defer allocator.free(tags);
+            const local_tag_bytes_read = try reader.readAll(@ptrCast(tags));
+            std.debug.assert(local_tag_bytes_read == item_count * @sizeOf(InternPool.Tag));
+            try alignReader(reader, local_tag_bytes_read, AirHeader.TARGET_ALIGNMENT);
 
-        {
-            // TODO(pwr): local shared append extra
+            const IpDataType = std.meta.FieldType(InternPool.Item, .data);
+            const data = try allocator.alloc(IpDataType, item_count);
+            defer allocator.free(data);
+            const local_data_bytes_read = try reader.readAll(@ptrCast(data));
+            std.debug.assert(local_data_bytes_read == item_count * @sizeOf(IpDataType));
+            try alignReader(reader, local_data_bytes_read, AirHeader.TARGET_ALIGNMENT);
+
+            const local_extra = try allocator.alloc(u32, extra_count);
+            defer allocator.free(local_extra);
+            const local_extra_bytes_read = try reader.readAll(@ptrCast(local_extra));
+            std.debug.assert(local_extra_bytes_read == extra_count * @sizeOf(@TypeOf(local_extra[0])));
+            try alignReader(reader, local_extra_bytes_read, AirHeader.TARGET_ALIGNMENT);
+
+            // TODO(pwr): append data
+            _ = local_shared;
+            // {
+            //     var local_mutable_items = local_shared.items.acquire().view();
+            //     try local_mutable_items.ensureUnusedCapacity(allocator, tags.len);
+            //     for (tags, data) |tag, variant| local_mutable_items.appendAssumeCapacity(.{ .tag = tag, .data = variant });
+            // }
+
+            // {
+            //     var local_mutable_extra = local_shared.extra.acquire().view();
+            //     try local_mutable_extra.ensureUnusedCapacity(allocator, local_extra.len);
+            //     for (local_extra) |e| local_mutable_extra.appendAssumeCapacity(.{e});
+            // }
         }
 
         break :intern_pool ip;
@@ -362,7 +443,7 @@ const t = std.testing;
 
 // Create a test compilation unit for testing without source files. Zcu stores the InternPool which is used in AIR.
 // Zcu unit holds a pointer to Compilation, so it cannot be created on its own (without null pointer hacks).
-pub const TestCompilationUnit = struct {
+pub const FakeCompilationUnit = struct {
     compilation: *Compilation,
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
@@ -500,7 +581,7 @@ pub const TestCompilationUnit = struct {
 // # End Function AIR: test.main
 test exportAir {
     const allocator = t.allocator;
-    var test_unit = try TestCompilationUnit.init(allocator);
+    var test_unit = try FakeCompilationUnit.init(allocator);
     defer test_unit.deinit();
     const zcu_per_thread = Zcu.PerThread{ .tid = .main, .zcu = test_unit.compilation.zcu.? };
 
@@ -585,7 +666,7 @@ test exportAir {
 
 test "Pack AIR functions into one buffer" {
     const allocator = t.allocator;
-    var test_unit = try TestCompilationUnit.init(allocator);
+    var test_unit = try FakeCompilationUnit.init(allocator);
     defer test_unit.deinit();
     const zcu_per_thread = Zcu.PerThread{ .tid = .main, .zcu = test_unit.compilation.zcu.? };
 

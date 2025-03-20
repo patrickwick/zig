@@ -99,5 +99,5 @@ analyze:
 test-integration:
 	${MAKE} test-unit
 	${MAKE} build
-	./zig-out/bin/zig build-obj --verbose-air ./analyzer/test.zig
+	./zig-out/bin/zig build-obj ./analyzer/test.zig
 	${MAKE} analyze

@@ -195,6 +195,7 @@ pub fn main() !void {
                     const value = air_lib.Value.fromInterned(ip_index);
 
                     // TODO(pwr): extract data from imported intern pool, so this succeeds:
+                    // => local shared items are required: ip.getLocalShared(unwrapped.tid).items.acquire().view().slice()
                     try writer.print("<{}, {}>", .{ ty.fmt(pt), value.fmtValue(pt) });
                 } else {
                     // instruction index
@@ -214,7 +215,8 @@ pub fn main() !void {
         };
 
         // Fake compilation unit with imported intern pool to use compiler APIs.
-        var zcu_fake = try air_lib.TestCompilationUnit.init(arena_allocator);
+        // TODO(pwr): integrate this directly into the import function?
+        var zcu_fake = try air_lib.FakeCompilationUnit.init(arena_allocator);
         defer zcu_fake.deinit();
         const zcu: *air_lib.Zcu = zcu_fake.compilation.zcu.?;
         const zcu_main_thread = air_lib.Zcu.PerThread{ .zcu = zcu, .tid = .main };

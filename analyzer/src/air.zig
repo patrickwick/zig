@@ -8,7 +8,7 @@ pub const AirImported = compiler.AirImported;
 pub const InternPool = compiler.InternPool;
 pub const Liveness = compiler.Liveness;
 pub const Value = compiler.Value;
-pub const TestCompilationUnit = compiler.TestCompilationUnit;
+pub const FakeCompilationUnit = compiler.FakeCompilationUnit;
 pub const Type = compiler.Type;
 pub const Zcu = compiler.Zcu;
 
