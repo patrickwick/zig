@@ -101,12 +101,28 @@ pub const AirHeader = extern struct {
     }
 };
 
+var air_export_counter: usize = 0;
+
 /// Export AIR for all instructions. The main body can be filtered from the instruction indexes stored in extra data.
 /// Native endianness only - assumed to be used on the same machine in a different process.
-pub fn exportAir(writer: std.io.AnyWriter, zcu_per_thread: Zcu.PerThread, air: Air, liveness: ?Liveness, function_name: []const u8) void {
+pub fn exportAir(zcu_per_thread: Zcu.PerThread, air: Air, liveness: ?Liveness, function_name: []const u8) void {
+    errdefer @panic("exportAir failed"); // TODO: handle properly
+
+    // Clear on first write, then append to support several functions in a single file.
+    const truncate = (air_export_counter == 0);
+    air_export_counter += 1;
+
+    const file = try std.fs.cwd().createFile(DEFAULT_BINARY_AIR_PATH, .{ .truncate = truncate });
+    defer file.close();
+    try file.seekFromEnd(0);
+    const writer = file.writer();
+
+    try exportAirFunction(writer, zcu_per_thread, air, liveness, function_name);
+}
+
+fn exportAirFunction(writer: anytype, zcu_per_thread: Zcu.PerThread, air: Air, liveness: ?Liveness, function_name: []const u8) !void {
     const header = AirHeader.init(air, liveness, zcu_per_thread, function_name);
 
-    errdefer @panic("exportAir writer failed"); // TODO: handle properly
     try writer.writeStruct(header);
     try writer.writeAll(function_name);
     try alignWriter(writer, function_name.len, AirHeader.TARGET_ALIGNMENT);
@@ -183,19 +199,6 @@ pub fn exportAir(writer: std.io.AnyWriter, zcu_per_thread: Zcu.PerThread, air: A
             try alignWriter(writer, intern_extra_inst_size, AirHeader.TARGET_ALIGNMENT);
         }
     }
-}
-
-/// Export AIR starting from a specific instruction index.
-pub fn exportAirInst(writer: std.io.AnyWriter, instruction_index: Air.Inst.Index, zcu_per_thread: Zcu.PerThread, air: Air, liveness: ?Liveness) void {
-    // TODO: not supported yet.
-    // It's unclear how the multi array list would be written incrementally using the writer abstraction.
-    // Also indexes stored in e.g. `Data.arg` would need to be adjusted accordingly.
-    _ = writer;
-    _ = instruction_index;
-    _ = air;
-    _ = zcu_per_thread;
-    _ = liveness;
-    @panic("exportAirInst is not supported yet");
 }
 
 fn alignWriter(writer: anytype, size: usize, comptime target_alignment: usize) !void {
@@ -543,7 +546,7 @@ test exportAir {
     var buffer = [1]u8{0} ** buffer_size;
     var stream = std.io.FixedBufferStream([]u8){ .buffer = &buffer, .pos = 0 };
     const function_name = "test.main";
-    exportAir(stream.writer().any(), zcu_per_thread, air, liveness, function_name);
+    try exportAirFunction(stream.writer().any(), zcu_per_thread, air, liveness, function_name);
     const total_size_bytes = try stream.getPos();
 
     try stream.seekTo(0);
@@ -626,7 +629,7 @@ test "Pack AIR functions into one buffer" {
     const writer = stream.writer().any();
 
     // Export without resetting the writer position.
-    for (0..iterations) |_| exportAir(writer, zcu_per_thread, air, liveness, function_name);
+    for (0..iterations) |_| try exportAirFunction(writer, zcu_per_thread, air, liveness, function_name);
     const total_size_bytes = try stream.getPos();
 
     try stream.seekTo(0);

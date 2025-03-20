@@ -8,7 +8,6 @@ const Type = @import("Type.zig");
 const Air = @import("Air.zig");
 const Liveness = @import("Liveness.zig");
 const InternPool = @import("InternPool.zig");
-const export_air = @import("export_air.zig");
 
 pub fn write(stream: anytype, pt: Zcu.PerThread, air: Air, liveness: ?Liveness) void {
     const instruction_bytes = air.instructions.len *
@@ -71,23 +70,8 @@ pub fn writeInst(
     writer.writeInst(stream, inst) catch return;
 }
 
-pub fn dump(pt: Zcu.PerThread, air: Air, liveness: ?Liveness, function_name: []const u8) void {
+pub fn dump(pt: Zcu.PerThread, air: Air, liveness: ?Liveness) void {
     write(std.io.getStdErr().writer(), pt, air, liveness);
-    dumpBinaryAir(pt, air, liveness, function_name) catch std.log.err("failed exporting binary AIR data for function: {s}", .{function_name});
-}
-
-var air_export_counter: usize = 0;
-
-fn dumpBinaryAir(pt: Zcu.PerThread, air: Air, liveness: ?Liveness, function_name: []const u8) !void {
-    // Clear on first write, then append to support several functions in a single file.
-    const truncate = (air_export_counter == 0);
-    air_export_counter += 1;
-
-    const file = try std.fs.cwd().createFile(export_air.DEFAULT_BINARY_AIR_PATH, .{ .truncate = truncate });
-    defer file.close();
-    try file.seekFromEnd(0);
-
-    export_air.exportAir(file.writer().any(), pt, air, liveness, function_name);
 }
 
 pub fn dumpInst(inst: Air.Inst.Index, pt: Zcu.PerThread, air: Air, liveness: ?Liveness) void {
