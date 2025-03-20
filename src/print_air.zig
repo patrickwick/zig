@@ -92,7 +92,6 @@ fn dumpBinaryAir(pt: Zcu.PerThread, air: Air, liveness: ?Liveness, function_name
 
 pub fn dumpInst(inst: Air.Inst.Index, pt: Zcu.PerThread, air: Air, liveness: ?Liveness) void {
     writeInst(std.io.getStdErr().writer(), inst, pt, air, liveness);
-    export_air.exportAirInst(std.io.getStdErr().writer().any(), inst, pt, air, liveness);
 }
 
 const Writer = struct {

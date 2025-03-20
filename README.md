@@ -1,5 +1,16 @@
 ![ZIG](https://ziglang.org/img/zig-logo-dynamic.svg)
 
+This Zig modification attempts to provide stable AIR and InternPool export / import functionalities to:
+
+* simplify external static analysis development for Zig.
+* enable fast AIR export and import compared to parsing the `--verbose-air` string representation.
+* provide a stable basis for experiments outside of the Zig compiler using actual Zig data structures and functions.
+    * successful experiments can be integrated into the compiler easily.
+    * very fast compile times by using the Zig compiler as a static library compared to experimenting in the compiler code.
+* **non-goal:** don't try to upstream these functions.
+    * providing export / import functions for the tagged Zig versions is sufficient for experimenting.
+    * no need to add additional complexity to the compiler that need to be changed when there are breaking changes to AIR or InternPool.
+
 A general-purpose programming language and toolchain for maintaining
 **robust**, **optimal**, and **reusable** software.
 

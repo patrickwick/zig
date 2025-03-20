@@ -149,6 +149,7 @@ pub fn main() !void {
     // %47!= ret_safe(@Air.Inst.Ref.void_value)
     // # End Function AIR: test.main
     {
+        // TODO(pwr): couldn't print_air.zig be used directly if all reconstruction is correct?
         // TODO(pwr): add store for variables.
         // TODO(pwr): how can identifiers be traced back? Using only the `dbg_x` instructions?
         // * Is any additional information required or does the fully qualified name, source code and AIR suffice?

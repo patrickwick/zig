@@ -31,37 +31,60 @@ pub const AirHeader = extern struct {
     liveness_tomb_bits_count: u64, // in entries, not bytes
     liveness_extra_count: u64, // in entries, not bytes
 
-    intern_locals_shared_extra_count: u64, // in entries, not bytes
+    intern_local_item_count: u64, // in entries, not bytes
+    intern_local_extra_count: u64, // in entries, not bytes
 
     pub fn init(air: Air, liveness: ?Liveness, zcu_per_thread: Zcu.PerThread, function_name: []const u8) @This() {
+        var total_size: u64 = 0;
+
         const header_size = std.mem.alignForward(usize, @sizeOf(@This()), TARGET_ALIGNMENT);
+        total_size += header_size;
+
         const tag_size = std.mem.alignForward(usize, air.instructions.len * @sizeOf(Air.Inst.Tag), TARGET_ALIGNMENT);
+        total_size += tag_size;
+
         const data_size = std.mem.alignForward(usize, air.instructions.len * @sizeOf(Air.Inst.Data), TARGET_ALIGNMENT);
+        total_size += data_size;
+
         const name_size = std.mem.alignForward(usize, function_name.len, TARGET_ALIGNMENT);
+        total_size += name_size;
+
         const extra_size = std.mem.alignForward(usize, air.extra.len * @sizeOf(@TypeOf(air.extra[0])), TARGET_ALIGNMENT);
+        total_size += extra_size;
+
         const liveness_tomb_bits_size = if (liveness) |l| std.mem.alignForward(usize, l.tomb_bits.len * @sizeOf(@TypeOf(l.tomb_bits[0])), TARGET_ALIGNMENT) else 0;
+        total_size += liveness_tomb_bits_size;
 
         // intern pool
         var intern_pool = zcu_per_thread.zcu.intern_pool;
 
-        // FIXME(pwr): temporarily replaced by mutable items -> are both always needed?
-        // const ip_local_shared = intern_pool.getLocalShared(.main);
-        // const ip_local_shared_slice = ip_local_shared.items.acquire().view().slice();
-
         // NOTE: failing allocator since we only want to read, not lazily add anything to the intern pool.
         const gpa = std.testing.failing_allocator;
-        const ip_local_shared = intern_pool.getLocal(.main);
-        const ip_local_shared_slice = ip_local_shared.getMutableItems(gpa).view().slice();
+        const ip_local = intern_pool.getLocal(.main);
 
-        const ipls_tags = ip_local_shared_slice.items(.tag);
-        const ipls_data = ip_local_shared_slice.items(.data);
-        std.debug.assert(ipls_tags.len == ipls_data.len); // single length for MultiArrayList
+        const item_count = count: {
+            const ip_local_item_slice = ip_local.getMutableItems(gpa).view().slice();
+            const tags = ip_local_item_slice.items(.tag);
+            const data = ip_local_item_slice.items(.data);
+            std.debug.assert(tags.len == data.len); // single length for MultiArrayList
 
-        const ipls_extra_tag_size = std.mem.alignForward(usize, ipls_tags.len * @sizeOf(std.meta.FieldType(InternPool.Item, .tag)), TARGET_ALIGNMENT);
-        const ipls_extra_inst_size = std.mem.alignForward(usize, ipls_data.len * @sizeOf(std.meta.FieldType(InternPool.Item, .data)), TARGET_ALIGNMENT);
-        const intern_pool_size = ipls_extra_tag_size + ipls_extra_inst_size;
+            const local_tag_size = std.mem.alignForward(usize, tags.len * @sizeOf(@TypeOf(tags[0])), TARGET_ALIGNMENT);
+            total_size += local_tag_size;
 
-        const total_size = header_size + tag_size + data_size + name_size + extra_size + liveness_tomb_bits_size + intern_pool_size;
+            const local_data_size = std.mem.alignForward(usize, data.len * @sizeOf(@TypeOf(data[0])), TARGET_ALIGNMENT);
+            total_size += local_data_size;
+
+            break :count ip_local_item_slice.len;
+        };
+
+        const extra_count = count: {
+            const extra = ip_local.getMutableExtra(gpa).view().slice();
+            const extra_data: [*]u32 = @ptrCast(@alignCast(extra.ptrs[0]));
+            const local_extra_size = std.mem.alignForward(usize, extra.len * @sizeOf(@TypeOf(extra_data[0])), TARGET_ALIGNMENT);
+            total_size += local_extra_size;
+
+            break :count extra.len;
+        };
 
         return .{
             .total_size_bytes = total_size,
@@ -70,7 +93,10 @@ pub const AirHeader = extern struct {
             .extra_data_count = @intCast(air.extra.len),
             .liveness_tomb_bits_count = if (liveness) |l| l.tomb_bits.len else 0,
             .liveness_extra_count = if (liveness) |l| l.extra.len else 0,
-            .intern_locals_shared_extra_count = ipls_tags.len,
+            .intern_local_item_count = item_count,
+            .intern_local_extra_count = extra_count,
+            // .intern_local_shared_item_count = item_count,
+            // .intern_local_shared_extra_count = extra_count,
         };
     }
 };
@@ -107,8 +133,8 @@ pub fn exportAir(writer: std.io.AnyWriter, zcu_per_thread: Zcu.PerThread, air: A
         // try alignWriter(writer, l.special.len * @sizeOf(@TypeOf(l.special[0])), AirHeader.TARGET_ALIGNMENT);
     }
 
-    // TODO(pwr): dump InternPool: AIR instructions contain indexes to entries in Data.bin_op, Data.ty, etc.
-    // Store the entire pool or iterate the instructions to store dereferenced values? There are helpers like `Air.value` for it.
+    // FIXME(pwr): the intern pool is shared across all functions, so exporting this for each function is a huge waste.
+    // => how to detect what the last exportAir call is? Loop around printAir needs to be changed.
     {
         var intern_pool = zcu_per_thread.zcu.intern_pool;
         const ip_local = intern_pool.getLocal(.main);
@@ -134,13 +160,11 @@ pub fn exportAir(writer: std.io.AnyWriter, zcu_per_thread: Zcu.PerThread, air: A
         }
 
         // Local mutable extra.
-        if (false) {
-            const extra = ip_local.getMutableExtra(gpa);
-            const extra_slice = extra.view().slice();
-
-            const extra_data = extra_slice.items(.u32);
-            try writer.writeAll(@ptrCast(extra_data));
-            const extra_size = extra_data.len * @sizeOf(@TypeOf(extra_data[0]));
+        {
+            const extra = ip_local.getMutableExtra(gpa).view().slice();
+            const extra_data: [*]u32 = @ptrCast(@alignCast(extra.ptrs[0]));
+            try writer.writeAll(@ptrCast(extra_data[0..extra.len]));
+            const extra_size = extra.len * @sizeOf(@TypeOf(extra_data[0]));
             try alignWriter(writer, extra_size, AirHeader.TARGET_ALIGNMENT);
         }
 
@@ -259,18 +283,24 @@ pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImp
 
     const intern_pool = intern_pool: {
         // TODO(pwr): no need to copy -> read and append directly
-        const tags = try allocator.alloc(InternPool.Tag, header.intern_locals_shared_extra_count);
+        const tags = try allocator.alloc(InternPool.Tag, header.intern_local_item_count);
         defer allocator.free(tags);
         const ip_tag_bytes_read = try reader.readAll(@ptrCast(tags));
-        std.debug.assert(ip_tag_bytes_read == header.intern_locals_shared_extra_count * @sizeOf(InternPool.Tag));
+        std.debug.assert(ip_tag_bytes_read == header.intern_local_item_count * @sizeOf(InternPool.Tag));
         try alignReader(reader, ip_tag_bytes_read, AirHeader.TARGET_ALIGNMENT);
 
         const IpDataType = std.meta.FieldType(InternPool.Item, .data);
-        const data = try allocator.alloc(IpDataType, header.intern_locals_shared_extra_count);
+        const data = try allocator.alloc(IpDataType, header.intern_local_item_count);
         defer allocator.free(data);
         const ip_data_bytes_read = try reader.readAll(@ptrCast(data));
-        std.debug.assert(ip_data_bytes_read == header.intern_locals_shared_extra_count * @sizeOf(IpDataType));
+        std.debug.assert(ip_data_bytes_read == header.intern_local_item_count * @sizeOf(IpDataType));
         try alignReader(reader, ip_data_bytes_read, AirHeader.TARGET_ALIGNMENT);
+
+        const local_extra = try allocator.alloc(u32, header.intern_local_extra_count);
+        defer allocator.free(local_extra);
+        const local_extra_bytes_read = try reader.readAll(@ptrCast(local_extra));
+        std.debug.assert(local_extra_bytes_read == header.intern_local_extra_count * @sizeOf(@TypeOf(local_extra[0])));
+        try alignReader(reader, local_extra_bytes_read, AirHeader.TARGET_ALIGNMENT);
 
         // NOTE(pwr): hardcoded for a single main thread with ID 0.
         const main = Zcu.PerThread.Id.main;
@@ -289,9 +319,9 @@ pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImp
         }
 
         {
-            // const local_mutable_extra = local.getMutableExtra(allocator);
-            // try local_mutable_extra.ensureUnusedCapacity(...);
-            // TODO(pwr): append extra
+            const local_mutable_extra = local.getMutableExtra(allocator);
+            try local_mutable_extra.ensureUnusedCapacity(local_extra.len);
+            for (local_extra) |e| local_mutable_extra.appendAssumeCapacity(.{e});
         }
 
         {
@@ -509,7 +539,7 @@ test exportAir {
     };
 
     // Export, import and assert data.
-    const buffer_size = 4096;
+    const buffer_size = 4 * 4096;
     var buffer = [1]u8{0} ** buffer_size;
     var stream = std.io.FixedBufferStream([]u8){ .buffer = &buffer, .pos = 0 };
     const function_name = "test.main";
@@ -587,14 +617,13 @@ test "Pack AIR functions into one buffer" {
     };
 
     // Test that exporting / importing multiple functions in a continuous stream works.
-    const buffer_size = 4096;
+    const iterations = 3;
+    const buffer_size = iterations * 4 * 4096;
     var buffer = [1]u8{0} ** buffer_size;
     var stream = std.io.FixedBufferStream([]u8){ .buffer = &buffer, .pos = 0 };
     const liveness = null;
     const function_name = "test.main";
     const writer = stream.writer().any();
-
-    const iterations = 3;
 
     // Export without resetting the writer position.
     for (0..iterations) |_| exportAir(writer, zcu_per_thread, air, liveness, function_name);
