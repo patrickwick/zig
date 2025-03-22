@@ -69,12 +69,25 @@ test-watch:
 .PHONY: test
 test:
 	time ${ZIG} test ./src/export_air.zig \
+		${ZIG_OPTIONS} \
 		-fno-llvm \
 		--zig-lib-dir ${ZIG_LIB_DIR} \
 		--test-filter "exportAir"
 
 .PHONY: release
 release:
+	time ${ZIG} build \
+		${ZIG_OPTIONS} \
+		-Ddebug-extensions=true \
+		-Doptimize=ReleaseSafe \
+		-Duse-llvm=true \
+		-Ddev=x86_64-linux \
+		--zig-lib-dir ${ZIG_LIB_DIR} \
+		--prefix zig-out-release \
+		--summary all
+
+.PHONY: release-fast
+release-fast:
 	time ${ZIG} build \
 		${ZIG_OPTIONS} \
 		-Ddebug-extensions=true \

@@ -188,6 +188,7 @@ pub fn main() !void {
                 return name.toSlice(air.*); // TODO(pwr): format escapes.
             }
 
+            // %4!= dbg_var_ptr
             fn writeInstructionHeader(writer: anytype, index: Air.Inst.Index, unused: bool, tag: Air.Inst.Tag) !void {
                 const unused_indicator: u8 = if (unused) '!' else ' ';
                 try writer.print("{}{c}= {s}", .{ index, unused_indicator, @tagName(tag) });
@@ -212,8 +213,11 @@ pub fn main() !void {
                 } else {
                     // instruction index
                     const op_unused = import.liveness.?.isUnused(operand.toIndex().?);
-                    const unused_indicator: u8 = if (op_unused) '!' else ' ';
-                    try writer.print("{c}{s}{}", .{ unused_indicator, if (is_instruction_ref) "%" else "", ref_display });
+                    try writer.print("{s}{s}{}", .{
+                        if (op_unused) "!" else "",
+                        if (is_instruction_ref) "%" else "",
+                        ref_display,
+                    });
                 }
             }
 
@@ -267,12 +271,16 @@ pub fn main() !void {
 
                     try out.writeByte('(');
                     defer out.writeByte(')') catch {};
-                    try Helpers.writeOperand(out, &air_import, payload_operand.operand, zcu_main_thread);
+                    // TODO(pwr): NYI: more data needs to be exported.
+                    // try Helpers.writeOperand(out, &air_import, payload_operand.operand, zcu_main_thread);
+                    try out.writeAll("<TODO: NYI>");
+
                     try out.writeAll(", [");
                     defer out.writeAll("]") catch {};
                     for (arguments, 0..) |arg, arg_i| {
                         if (arg_i != 0) try out.writeAll(", ");
-                        try Helpers.writeOperand(out, &air_import, arg, zcu_main_thread);
+                        _ = arg;
+                        // try Helpers.writeOperand(out, &air_import, arg, zcu_main_thread);
                     }
                 },
 
