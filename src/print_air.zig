@@ -432,6 +432,11 @@ const Writer = struct {
         const zcu = w.pt.zcu;
         const ty_pl = w.air.instructions.items(.data)[@intFromEnum(inst)].ty_pl;
         const vector_ty = ty_pl.ty.toType();
+        if (InternPool.ANALYZER) {
+            try s.writeAll("<TODO: MYI: aggregate>");
+            return; // TODO(pwr): NYI.
+        }
+
         const len = @as(usize, @intCast(vector_ty.arrayLen(zcu)));
         const elements = @as([]const Air.Inst.Ref, @ptrCast(w.air.extra[ty_pl.payload..][0..len]));
 
@@ -975,6 +980,11 @@ const Writer = struct {
         if (@intFromEnum(operand) < InternPool.static_len) {
             return s.print("@{}", .{operand});
         } else if (operand.toInterned()) |ip_index| {
+            if (InternPool.ANALYZER) {
+                try s.writeAll("<TODO: MYI: interned operand>");
+                return; // TODO(pwr): NYI.
+            }
+
             const pt = w.pt;
             const ty = Type.fromInterned(pt.zcu.intern_pool.indexToKey(ip_index).typeOf());
             try s.print("<{}, {}>", .{

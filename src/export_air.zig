@@ -8,6 +8,7 @@ const Compilation = @import("Compilation.zig");
 pub const InternPool = @import("InternPool.zig");
 pub const Liveness = @import("Liveness.zig");
 const Package = @import("Package.zig");
+pub const print_air = @import("print_air.zig");
 pub const Type = @import("Type.zig");
 pub const Value = @import("Value.zig");
 pub const Zcu = @import("Zcu.zig");

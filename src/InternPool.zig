@@ -6768,6 +6768,11 @@ const debug_state = struct {
 pub fn indexToKey(ip: *const InternPool, index: Index) Key {
     assert(index != .none);
     const unwrapped_index = index.unwrap(ip);
+    if (ANALYZER) {
+        std.log.warn("TODO: NYI: indexToKey on unknown index: {any}", .{unwrapped_index});
+        const slice = ip.getLocalShared(unwrapped_index.tid).items.acquire().view().slice();
+        if (unwrapped_index.index >= slice.len) return .{ .simple_type = .void };
+    }
     const item = unwrapped_index.getItem(ip);
     const data = item.data;
     return switch (item.tag) {
@@ -10874,7 +10879,10 @@ fn dumpStatsFallible(ip: *const InternPool, arena: Allocator) anyerror!void {
             items.items(.tag)[0..local.mutate.items.len],
             items.items(.data)[0..local.mutate.items.len],
         ) |tag, data| {
-            if (ANALYZER) break; // TODO(pwr): NYI.
+            if (ANALYZER) {
+                std.log.warn("TODO: NYI: dumpStatsFallible", .{});
+                break; // TODO(pwr): NYI.
+            }
 
             const gop = try counts.getOrPut(tag);
             if (!gop.found_existing) gop.value_ptr.* = .{};
@@ -11237,7 +11245,10 @@ pub fn dumpGenericInstancesFallible(ip: *const InternPool, allocator: Allocator)
     instances.sort(SortContext{ .values = instances.values() });
     var it = instances.iterator();
     while (it.next()) |entry| {
-        if (ANALYZER) break; // TODO(pwr): NYI.
+        if (ANALYZER) {
+            std.log.warn("TODO: NYI: dumpGenericInstancesFallible", .{});
+            break; // TODO(pwr): NYI.
+        }
 
         const generic_fn_owner_nav = ip.getNav(ip.funcDeclInfo(entry.key_ptr.*).owner_nav);
         try w.print("{} ({}): \n", .{ generic_fn_owner_nav.name.fmt(ip), entry.value_ptr.items.len });
