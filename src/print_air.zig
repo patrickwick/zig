@@ -980,13 +980,14 @@ const Writer = struct {
         if (@intFromEnum(operand) < InternPool.static_len) {
             return s.print("@{}", .{operand});
         } else if (operand.toInterned()) |ip_index| {
+            const pt = w.pt;
+            const ty = Type.fromInterned(pt.zcu.intern_pool.indexToKey(ip_index).typeOf());
+
             if (InternPool.ANALYZER) {
-                try s.writeAll("<TODO: MYI: interned operand>");
+                try s.print("<{}, TODO: NYI: Value.fromInterned>", .{ty.fmt(pt)});
                 return; // TODO(pwr): NYI.
             }
 
-            const pt = w.pt;
-            const ty = Type.fromInterned(pt.zcu.intern_pool.indexToKey(ip_index).typeOf());
             try s.print("<{}, {}>", .{
                 ty.fmt(pt),
                 Value.fromInterned(ip_index).fmtValue(pt),

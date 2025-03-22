@@ -2,6 +2,7 @@
 //! This data structure is self-contained.
 
 pub var ANALYZER = false;
+const export_air = @import("export_air.zig");
 
 /// One item per thread, indexed by `tid`, which is dense and unique per thread.
 locals: []Local,
@@ -6691,6 +6692,9 @@ pub fn init(ip: *InternPool, gpa: Allocator, available_threads: usize) !void {
 pub fn deinit(ip: *InternPool, gpa: Allocator) void {
     if (debug_state.enable_checks) std.debug.assert(debug_state.intern_pool == null);
 
+    // Export once at the very end to have the full intern pool dump for all modules.
+    if (!ANALYZER) export_air.exportInternPool(ip, gpa);
+
     ip.src_hash_deps.deinit(gpa);
     ip.nav_val_deps.deinit(gpa);
     ip.nav_ty_deps.deinit(gpa);
@@ -6769,9 +6773,11 @@ pub fn indexToKey(ip: *const InternPool, index: Index) Key {
     assert(index != .none);
     const unwrapped_index = index.unwrap(ip);
     if (ANALYZER) {
-        std.log.warn("TODO: NYI: indexToKey on unknown index: {any}", .{unwrapped_index});
         const slice = ip.getLocalShared(unwrapped_index.tid).items.acquire().view().slice();
-        if (unwrapped_index.index >= slice.len) return .{ .simple_type = .void };
+        if (unwrapped_index.index >= slice.len) {
+            std.log.warn("TODO: NYI: indexToKey on unknown index: {any}", .{unwrapped_index});
+            return .{ .simple_type = .void };
+        }
     }
     const item = unwrapped_index.getItem(ip);
     const data = item.data;

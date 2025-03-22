@@ -14,6 +14,7 @@ pub const Value = @import("Value.zig");
 pub const Zcu = @import("Zcu.zig");
 
 pub const DEFAULT_BINARY_AIR_PATH = "air_export.air.bin";
+pub const DEFAULT_BINARY_INTERN_POOL_PATH = "air_export.ip.bin";
 
 const endianness = builtin.target.cpu.arch.endian();
 
@@ -23,9 +24,24 @@ pub const AirHeader = extern struct {
     pub const TARGET_ALIGNMENT = 8;
     pub const MAGIC = 0x21504d5544524941; // "AIRDUMP!" in hex
 
+    pub const InternPoolHeader = extern struct {
+        pub const MAGIC_IP = 0x2121504d445049; // "IPDUMP!!" in hex
+
+        magic: u64 = MAGIC_IP,
+        // TODO(pwr): add version field
+        total_size: u64,
+
+        intern_local_item_count: u64, // in entries, not bytes
+        intern_local_extra_count: u64, // in entries, not bytes
+
+        intern_local_shared_item_count: u64, // in entries, not bytes
+        intern_local_shared_extra_count: u64, // in entries, not bytes
+    };
+
     magic: u64 = MAGIC,
     // TODO(pwr): add version field
     total_size_bytes: u64,
+
     function_name_length: u64, // in bytes
     instruction_count: u64, // in entries, not bytes
     extra_data_count: u64, // in entries, not bytes
@@ -33,13 +49,7 @@ pub const AirHeader = extern struct {
     liveness_tomb_bits_count: u64, // in entries, not bytes
     liveness_extra_count: u64, // in entries, not bytes
 
-    intern_local_item_count: u64, // in entries, not bytes
-    intern_local_extra_count: u64, // in entries, not bytes
-
-    intern_local_shared_item_count: u64, // in entries, not bytes
-    intern_local_shared_extra_count: u64, // in entries, not bytes
-
-    pub fn init(air: Air, liveness: ?Liveness, zcu_per_thread: Zcu.PerThread, function_name: []const u8) @This() {
+    pub fn init(air: Air, liveness: ?Liveness, function_name: []const u8) @This() {
         var total_size: u64 = 0;
 
         const header_size = std.mem.alignForward(usize, @sizeOf(@This()), TARGET_ALIGNMENT);
@@ -60,8 +70,18 @@ pub const AirHeader = extern struct {
         const liveness_tomb_bits_size = if (liveness) |l| std.mem.alignForward(usize, l.tomb_bits.len * @sizeOf(@TypeOf(l.tomb_bits[0])), TARGET_ALIGNMENT) else 0;
         total_size += liveness_tomb_bits_size;
 
-        // intern pool
-        var intern_pool = zcu_per_thread.zcu.intern_pool;
+        return .{
+            .total_size_bytes = total_size,
+            .function_name_length = function_name.len,
+            .instruction_count = @intCast(air.instructions.len),
+            .extra_data_count = @intCast(air.extra.len),
+            .liveness_tomb_bits_count = if (liveness) |l| l.tomb_bits.len else 0,
+            .liveness_extra_count = if (liveness) |l| l.extra.len else 0,
+        };
+    }
+
+    pub fn initInternPoolHeader(intern_pool: *InternPool) AirHeader.InternPoolHeader {
+        var total_size: u64 = 0;
 
         // NOTE: failing allocator since we only want to read, not lazily add anything to the intern pool.
         const gpa = std.testing.failing_allocator;
@@ -118,12 +138,7 @@ pub const AirHeader = extern struct {
         };
 
         return .{
-            .total_size_bytes = total_size,
-            .function_name_length = function_name.len,
-            .instruction_count = @intCast(air.instructions.len),
-            .extra_data_count = @intCast(air.extra.len),
-            .liveness_tomb_bits_count = if (liveness) |l| l.tomb_bits.len else 0,
-            .liveness_extra_count = if (liveness) |l| l.extra.len else 0,
+            .total_size = total_size,
             .intern_local_item_count = item_count,
             .intern_local_extra_count = extra_count,
             .intern_local_shared_item_count = shared_item_count,
@@ -133,13 +148,13 @@ pub const AirHeader = extern struct {
 };
 
 var air_export_counter: usize = 0;
+var intern_pool_export_counter: usize = 0;
 
 /// Export AIR for all instructions. The main body can be filtered from the instruction indexes stored in extra data.
 /// Native endianness only - assumed to be used on the same machine in a different process.
 /// This data can also be written to a ELF section to be used like a debug format but for static analysis.
 pub fn exportAir(zcu_per_thread: Zcu.PerThread, air: Air, liveness: ?Liveness, function_name: []const u8) void {
-    if (comptime !builtin.single_threaded) @compileError("Export AIR is only supported in a single threaded build!");
-
+    if (comptime !builtin.single_threaded) @compileError("Export AIR is only supported in a single threaded build (-Dsingle-threaded=true)!");
     errdefer @panic("exportAir failed"); // TODO: handle properly
 
     // FIXME(pwr): the intern pool is shared across all functions, so exporting this for each function is a huge waste.
@@ -160,10 +175,28 @@ pub fn exportAir(zcu_per_thread: Zcu.PerThread, air: Air, liveness: ?Liveness, f
     try exportAirWriter(writer, zcu_per_thread, air, liveness, function_name);
 }
 
+pub fn exportInternPool(intern_pool: *InternPool, allocator: std.mem.Allocator) void {
+    if (comptime !builtin.single_threaded) @compileError("Export AIR is only supported in a single threaded build (-Dsingle-threaded=true)!");
+    errdefer @panic("exportAir failed"); // TODO: handle properly
+
+    // Clear on first write, then append to support several functions in a single file.
+    const truncate = (intern_pool_export_counter == 0);
+    intern_pool_export_counter += 1;
+
+    const file = try std.fs.cwd().createFile(DEFAULT_BINARY_INTERN_POOL_PATH, .{ .truncate = truncate });
+    defer file.close();
+    try file.seekFromEnd(0);
+    const writer = file.writer();
+
+    try exportInternPoolWriter(writer, intern_pool, allocator);
+}
+
 fn exportAirWriter(writer: anytype, zcu_per_thread: Zcu.PerThread, air: Air, liveness: ?Liveness, function_name: []const u8) !void {
-    const header = AirHeader.init(air, liveness, zcu_per_thread, function_name);
+    const header = AirHeader.init(air, liveness, function_name);
 
     try writer.writeStruct(header);
+    try alignWriter(writer, @sizeOf(AirHeader), AirHeader.TARGET_ALIGNMENT);
+
     try writer.writeAll(function_name);
     try alignWriter(writer, function_name.len, AirHeader.TARGET_ALIGNMENT);
 
@@ -189,66 +222,64 @@ fn exportAirWriter(writer: anytype, zcu_per_thread: Zcu.PerThread, air: Air, liv
         // try alignWriter(writer, l.special.len * @sizeOf(@TypeOf(l.special[0])), AirHeader.TARGET_ALIGNMENT);
     }
 
-    // TODO(pwr): the InternPool.List data structures store their header inside the first few bytes of the buffer itself.
-    // => why not just dump the whole thing?
-    // NOTE: uses internal knowledge of the InternPool ABI that:
-    // * items.bytes are layout out like a MultiArrayList including its reserved capacity bytes (items.view()).
-    // * items.bytes does not include the header bytes though -> add the header bytes in front too.
+    try exportInternPoolWriter(writer, &zcu_per_thread.zcu.intern_pool, zcu_per_thread.zcu.gpa);
+}
+
+fn exportInternPoolWriter(writer: anytype, intern_pool: *InternPool, allocator: std.mem.Allocator) !void {
+    const ip_local = intern_pool.getLocal(.main);
+    const ip_local_shared = intern_pool.getLocalShared(.main);
+
+    const header = AirHeader.initInternPoolHeader(intern_pool);
+
+    try writer.writeStruct(header);
+    try alignWriter(writer, @sizeOf(AirHeader.InternPoolHeader), AirHeader.TARGET_ALIGNMENT);
+
+    // Local mutable items.
     {
-        var intern_pool = zcu_per_thread.zcu.intern_pool;
-        const ip_local = intern_pool.getLocal(.main);
-        const ip_local_shared = intern_pool.getLocalShared(.main);
+        const items = ip_local.getMutableItems(allocator).view().slice();
 
-        // NOTE: failing allocator since we only want to read, not lazily add anything to the intern pool.
-        const gpa = std.testing.failing_allocator;
+        const tags = items.items(.tag);
+        try writer.writeAll(@ptrCast(tags));
+        const tag_size = tags.len * @sizeOf(@TypeOf(tags[0]));
+        try alignWriter(writer, tag_size, AirHeader.TARGET_ALIGNMENT);
 
-        // Local mutable items.
-        {
-            const items = ip_local.getMutableItems(gpa).view().slice();
+        const data = items.items(.data);
+        try writer.writeAll(@ptrCast(data));
+        const data_size = data.len * @sizeOf(@TypeOf(data[0]));
+        try alignWriter(writer, data_size, AirHeader.TARGET_ALIGNMENT);
+    }
 
-            const tags = items.items(.tag);
-            try writer.writeAll(@ptrCast(tags));
-            const tag_size = tags.len * @sizeOf(@TypeOf(tags[0]));
-            try alignWriter(writer, tag_size, AirHeader.TARGET_ALIGNMENT);
+    // Local mutable extra.
+    {
+        const extra = ip_local.getMutableExtra(allocator).view().slice();
+        const extra_data = extra.items(.@"0"); // first anonymous field of type u32.
+        try writer.writeAll(@ptrCast(extra_data));
+        const extra_size = extra_data.len * @sizeOf(@TypeOf(extra_data[0]));
+        try alignWriter(writer, extra_size, AirHeader.TARGET_ALIGNMENT);
+    }
 
-            const data = items.items(.data);
-            try writer.writeAll(@ptrCast(data));
-            const data_size = data.len * @sizeOf(@TypeOf(data[0]));
-            try alignWriter(writer, data_size, AirHeader.TARGET_ALIGNMENT);
-        }
+    // Local shared mutable items.
+    {
+        const items = ip_local_shared.items.acquire().view().slice();
 
-        // Local mutable extra.
-        {
-            const extra = ip_local.getMutableExtra(gpa).view().slice();
-            const extra_data = extra.items(.@"0"); // first anonymous field of type u32.
-            try writer.writeAll(@ptrCast(extra_data));
-            const extra_size = extra_data.len * @sizeOf(@TypeOf(extra_data[0]));
-            try alignWriter(writer, extra_size, AirHeader.TARGET_ALIGNMENT);
-        }
+        const tags = items.items(.tag);
+        try writer.writeAll(@ptrCast(tags));
+        const tag_size = tags.len * @sizeOf(@TypeOf(tags[0]));
+        try alignWriter(writer, tag_size, AirHeader.TARGET_ALIGNMENT);
 
-        // Local shared mutable items.
-        {
-            const items = ip_local_shared.items.acquire().view().slice();
+        const data = items.items(.data);
+        try writer.writeAll(@ptrCast(data));
+        const data_size = data.len * @sizeOf(@TypeOf(data[0]));
+        try alignWriter(writer, data_size, AirHeader.TARGET_ALIGNMENT);
+    }
 
-            const tags = items.items(.tag);
-            try writer.writeAll(@ptrCast(tags));
-            const tag_size = tags.len * @sizeOf(@TypeOf(tags[0]));
-            try alignWriter(writer, tag_size, AirHeader.TARGET_ALIGNMENT);
-
-            const data = items.items(.data);
-            try writer.writeAll(@ptrCast(data));
-            const data_size = data.len * @sizeOf(@TypeOf(data[0]));
-            try alignWriter(writer, data_size, AirHeader.TARGET_ALIGNMENT);
-        }
-
-        // Local shared mutable extra.
-        {
-            const extra = ip_local_shared.extra.acquire().view().slice();
-            const extra_data = extra.items(.@"0"); // first anonymous field of type u32.
-            try writer.writeAll(@ptrCast(extra_data));
-            const extra_size = extra_data.len * @sizeOf(@TypeOf(extra_data[0]));
-            try alignWriter(writer, extra_size, AirHeader.TARGET_ALIGNMENT);
-        }
+    // Local shared mutable extra.
+    {
+        const extra = ip_local_shared.extra.acquire().view().slice();
+        const extra_data = extra.items(.@"0"); // first anonymous field of type u32.
+        try writer.writeAll(@ptrCast(extra_data));
+        const extra_size = extra_data.len * @sizeOf(@TypeOf(extra_data[0]));
+        try alignWriter(writer, extra_size, AirHeader.TARGET_ALIGNMENT);
     }
 }
 
@@ -265,17 +296,26 @@ fn alignReader(reader: anytype, size: usize, comptime target_alignment: usize) !
 /// Imported AIR.
 /// Header followed by the data in the same order as the counts with fixed alignment defined in the header.
 pub const AirImported = struct {
+    pub const InternPoolImported = struct {
+        intern_pool: InternPool,
+        local_shared_data: []align(8) u8, // FIXME(pwr): explicit shared list alignment stored in the buffer.
+
+        pub fn deinit(self: *@This()) void {
+            self.allocator.free(self.local_shared_data);
+            self.intern_pool.deinit(self.allocator);
+        }
+    };
+
     header: AirHeader,
     function_name: []const u8,
     air: Air,
-    intern_pool: InternPool,
-    local_shared_data: []align(8) u8, // FIXME(pwr): explicit shared list alignment stored in the buffer.
     /// Instructions owned by the caller that needs to free it using the provided allocator.
     instructions_owned: std.MultiArrayList(Air.Inst),
     liveness: ?Liveness,
     zcu_fake: FakeCompilationUnit,
     zcu: *Zcu,
     zcu_main_thread: Zcu.PerThread,
+    intern_pool_imported: InternPoolImported,
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *@This()) void {
@@ -286,9 +326,7 @@ pub const AirImported = struct {
         if (self.liveness) |l| self.allocator.free(l.tomb_bits);
         if (self.liveness) |l| self.allocator.free(l.extra);
 
-        self.allocator.free(self.local_shared_data);
-        self.intern_pool.deinit(self.allocator);
-
+        self.intern_pool_imported.deinit();
         self.zcu_fake.deinit();
     }
 };
@@ -296,9 +334,11 @@ pub const AirImported = struct {
 // TODO: return optional to indicate end of stream without an error.
 // TODO: require a seekable stream to ensure that the correct bytes are consumed?
 pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImported {
-    if (comptime !builtin.single_threaded) @compileError("Import AIR is only supported in a single threaded build!");
+    if (comptime !builtin.single_threaded) @compileError("Export AIR is only supported in a single threaded build (-Dsingle-threaded=true)!");
 
     const header = try reader.readStruct(AirHeader);
+    try alignReader(reader, @sizeOf(AirHeader), AirHeader.TARGET_ALIGNMENT);
+
     if (header.magic != AirHeader.MAGIC) return error.InvalidMagicValue;
 
     var instructions = std.MultiArrayList(Air.Inst){};
@@ -350,133 +390,11 @@ pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImp
         };
     };
 
-    var local_shared_data: ?[]align(8) u8 = null; // FIXME(pwr): explicit shared list alignment stored in the buffer.
-
-    // TODO(pwr): try to remove the InternPool code changes to overwrite the values.
-    const intern_pool = intern_pool: {
-        // NOTE(pwr): hardcoded for a single main thread with ID 0.
-        const thread_id = Zcu.PerThread.Id.main;
-        const thread_count = 1;
-        std.debug.assert(@intFromEnum(thread_id) == 0);
-
-        // InternPool to reconstruct.
-        var ip = InternPool.empty;
-        try ip.init(allocator, thread_count);
-
-        // Local.
-        {
-            const local = ip.getLocal(thread_id);
-            const item_count = header.intern_local_item_count;
-            const extra_count = header.intern_local_extra_count;
-
-            // TODO(pwr): no need to copy -> read and append directly
-            const tags = try allocator.alloc(InternPool.Tag, item_count);
-            defer allocator.free(tags);
-            const local_tag_bytes_read = try reader.readAll(@ptrCast(tags));
-            std.debug.assert(local_tag_bytes_read == item_count * @sizeOf(InternPool.Tag));
-            try alignReader(reader, local_tag_bytes_read, AirHeader.TARGET_ALIGNMENT);
-
-            const IpDataType = std.meta.FieldType(InternPool.Item, .data);
-            const data = try allocator.alloc(IpDataType, item_count);
-            defer allocator.free(data);
-            const local_data_bytes_read = try reader.readAll(@ptrCast(data));
-            std.debug.assert(local_data_bytes_read == item_count * @sizeOf(IpDataType));
-            try alignReader(reader, local_data_bytes_read, AirHeader.TARGET_ALIGNMENT);
-
-            const local_extra = try allocator.alloc(u32, extra_count);
-            defer allocator.free(local_extra);
-            const local_extra_bytes_read = try reader.readAll(@ptrCast(local_extra));
-            std.debug.assert(local_extra_bytes_read == extra_count * @sizeOf(@TypeOf(local_extra[0])));
-            try alignReader(reader, local_extra_bytes_read, AirHeader.TARGET_ALIGNMENT);
-
-            {
-                const local_mutable_items = local.getMutableItems(allocator);
-                local_mutable_items.shrinkRetainingCapacity(0); // NOTE: delete intern pool statically known items added in init.
-                try local_mutable_items.ensureTotalCapacity(tags.len);
-                for (tags, data) |tag, variant| local_mutable_items.appendAssumeCapacity(.{ .tag = tag, .data = variant });
-            }
-
-            {
-                const local_mutable_extra = local.getMutableExtra(allocator);
-                local_mutable_extra.shrinkRetainingCapacity(0); // NOTE: delete intern pool statically known items added in init.
-                try local_mutable_extra.ensureUnusedCapacity(local_extra.len);
-                for (local_extra) |e| local_mutable_extra.appendAssumeCapacity(.{e});
-            }
-        }
-
-        // Local shared.
-        {
-            // const local_shared = ip.getLocalShared(thread_id);
-            const item_count = header.intern_local_shared_item_count;
-            const extra_count = header.intern_local_shared_extra_count;
-
-            // TODO(pwr): no need to copy -> directly read into resized multi array
-            const tags = try allocator.alloc(InternPool.Tag, item_count);
-            defer allocator.free(tags);
-            const local_tag_bytes_read = try reader.readAll(@ptrCast(tags));
-            std.debug.assert(local_tag_bytes_read == item_count * @sizeOf(InternPool.Tag));
-            try alignReader(reader, local_tag_bytes_read, AirHeader.TARGET_ALIGNMENT);
-
-            const IpDataType = std.meta.FieldType(InternPool.Item, .data);
-            const data = try allocator.alloc(IpDataType, item_count);
-            defer allocator.free(data);
-            const local_data_bytes_read = try reader.readAll(@ptrCast(data));
-            std.debug.assert(local_data_bytes_read == item_count * @sizeOf(IpDataType));
-            try alignReader(reader, local_data_bytes_read, AirHeader.TARGET_ALIGNMENT);
-
-            const local_extra = try allocator.alloc(u32, extra_count);
-            defer allocator.free(local_extra);
-            const local_extra_bytes_read = try reader.readAll(@ptrCast(local_extra));
-            std.debug.assert(local_extra_bytes_read == extra_count * @sizeOf(@TypeOf(local_extra[0])));
-            try alignReader(reader, local_extra_bytes_read, AirHeader.TARGET_ALIGNMENT);
-
-            // NOTE: InternPool.Local.Shared does not provide mutable APIs like Local does.
-            // Instead, internal knowledge of its ABI is used here to construct it directly in memory.
-            // => **not** stable wrt. InternPool Shared data structure changes!
-            // There probably is a simpler way that I haven't found. Suggestions are welcome.
-            {
-                // NOTE: ip.getLocalShared(thread_id) cannot be used since it returns an immutable pointer.
-                const shared_items = &ip.locals[@intFromEnum(thread_id)].shared.items;
-                const ItemList = @TypeOf(shared_items.*);
-
-                // NOTE: unstable internal type used here!
-                // => helper for correct alignment only.
-                // ip.locals.shared.items stores a pointer to the bytes array **after** the header only!
-                // Internally, InternPool.Item functions then subtract the header size from the pointer to get access to the header.
-                const ListInternalType = extern struct {
-                    pub const data_alignment = @alignOf(InternPool.Item);
-                    pub const header_byte_size = std.mem.alignForward(usize, @sizeOf(ItemList.Header), data_alignment);
-                    header: ItemList.Header,
-                    bytes: [0]u8 align(data_alignment), // 0 element array for alignment. Data resides here in allocated block.
-                };
-
-                const new_data_size = ListInternalType.header_byte_size + @TypeOf(shared_items.view()).capacityInBytes(item_count);
-                local_shared_data = try allocator.alignedAlloc(u8, @alignOf(ItemList), new_data_size); // FIXME(pwr): use explicit alignment again
-                errdefer allocator.free(local_shared_data);
-
-                const internal_type: *ListInternalType = @ptrCast(local_shared_data);
-                internal_type.header = .{ .capacity = @intCast(item_count) }; // 32bit count, u64 only due to serialization type.
-                // NOTE: ip.locals.shared.items stores a pointer to the bytes array **after** the header only!
-                shared_items.* = .{ .bytes = &internal_type.bytes };
-
-                const view = shared_items.view();
-                const mutable: *@TypeOf(view) = @constCast(&view);
-                for (tags, data, 0..) |tag, variant, i| mutable.set(i, .{ .tag = tag, .data = variant });
-            }
-        }
-
-        // NOTE(pwr): calling ip.dump() crashes with multithreading => not sure it it's related to reconstruction.
-        // It also crashes for me when using --verbose-intern-pool without modifying the compiler.
-        if (builtin.single_threaded) {
-            ip.dump();
-            ip.dumpGenericInstances(allocator);
-        }
-        break :intern_pool ip;
-    };
-
     const zcu_fake = try FakeCompilationUnit.init(allocator);
     const zcu = zcu_fake.compilation.zcu.?;
     const zcu_main_thread = Zcu.PerThread{ .zcu = zcu, .tid = .main };
+
+    const intern_pool_imported = try importInternPool(allocator, reader);
 
     return .{
         .header = header,
@@ -485,14 +403,145 @@ pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImp
             .instructions = instructions.slice(),
             .extra = extra,
         },
-        .intern_pool = intern_pool,
-        .local_shared_data = local_shared_data.?,
+        .intern_pool_imported = intern_pool_imported,
         .instructions_owned = instructions,
         .liveness = liveness,
         .zcu_fake = zcu_fake,
         .zcu = zcu,
         .zcu_main_thread = zcu_main_thread,
         .allocator = allocator,
+    };
+}
+
+pub fn importInternPool(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImported.InternPoolImported {
+    // TODO: extract function
+    const intern_pool_header = try reader.readStruct(AirHeader.InternPoolHeader);
+    try alignReader(reader, @sizeOf(AirHeader.InternPoolHeader), AirHeader.TARGET_ALIGNMENT);
+
+    var local_shared_data: ?[]align(8) u8 = null; // FIXME(pwr): explicit shared list alignment stored in the buffer.
+
+    // TODO(pwr): try to remove the InternPool code changes to overwrite the values.
+    // NOTE(pwr): hardcoded for a single main thread with ID 0.
+    const thread_id = Zcu.PerThread.Id.main;
+    const thread_count = 1;
+    std.debug.assert(@intFromEnum(thread_id) == 0);
+
+    // InternPool to reconstruct.
+    var ip = InternPool.empty;
+    try ip.init(allocator, thread_count);
+
+    // Local.
+    {
+        const local = ip.getLocal(thread_id);
+        const item_count = intern_pool_header.intern_local_item_count;
+        const extra_count = intern_pool_header.intern_local_extra_count;
+
+        // TODO(pwr): no need to copy -> read and append directly
+        const tags = try allocator.alloc(InternPool.Tag, item_count);
+        defer allocator.free(tags);
+        const local_tag_bytes_read = try reader.readAll(@ptrCast(tags));
+        std.debug.assert(local_tag_bytes_read == item_count * @sizeOf(InternPool.Tag));
+        try alignReader(reader, local_tag_bytes_read, AirHeader.TARGET_ALIGNMENT);
+
+        const IpDataType = std.meta.FieldType(InternPool.Item, .data);
+        const data = try allocator.alloc(IpDataType, item_count);
+        defer allocator.free(data);
+        const local_data_bytes_read = try reader.readAll(@ptrCast(data));
+        std.debug.assert(local_data_bytes_read == item_count * @sizeOf(IpDataType));
+        try alignReader(reader, local_data_bytes_read, AirHeader.TARGET_ALIGNMENT);
+
+        const local_extra = try allocator.alloc(u32, extra_count);
+        defer allocator.free(local_extra);
+        const local_extra_bytes_read = try reader.readAll(@ptrCast(local_extra));
+        std.debug.assert(local_extra_bytes_read == extra_count * @sizeOf(@TypeOf(local_extra[0])));
+        try alignReader(reader, local_extra_bytes_read, AirHeader.TARGET_ALIGNMENT);
+
+        {
+            const local_mutable_items = local.getMutableItems(allocator);
+            local_mutable_items.shrinkRetainingCapacity(0); // NOTE: delete intern pool statically known items added in init.
+            try local_mutable_items.ensureTotalCapacity(tags.len);
+            for (tags, data) |tag, variant| local_mutable_items.appendAssumeCapacity(.{ .tag = tag, .data = variant });
+        }
+
+        {
+            const local_mutable_extra = local.getMutableExtra(allocator);
+            local_mutable_extra.shrinkRetainingCapacity(0); // NOTE: delete intern pool statically known items added in init.
+            try local_mutable_extra.ensureUnusedCapacity(local_extra.len);
+            for (local_extra) |e| local_mutable_extra.appendAssumeCapacity(.{e});
+        }
+    }
+
+    // Local shared.
+    {
+        // const local_shared = ip.getLocalShared(thread_id);
+        const item_count = intern_pool_header.intern_local_shared_item_count;
+        const extra_count = intern_pool_header.intern_local_shared_extra_count;
+
+        // TODO(pwr): no need to copy -> directly read into resized multi array
+        const tags = try allocator.alloc(InternPool.Tag, item_count);
+        defer allocator.free(tags);
+        const local_tag_bytes_read = try reader.readAll(@ptrCast(tags));
+        std.debug.assert(local_tag_bytes_read == item_count * @sizeOf(InternPool.Tag));
+        try alignReader(reader, local_tag_bytes_read, AirHeader.TARGET_ALIGNMENT);
+
+        const IpDataType = std.meta.FieldType(InternPool.Item, .data);
+        const data = try allocator.alloc(IpDataType, item_count);
+        defer allocator.free(data);
+        const local_data_bytes_read = try reader.readAll(@ptrCast(data));
+        std.debug.assert(local_data_bytes_read == item_count * @sizeOf(IpDataType));
+        try alignReader(reader, local_data_bytes_read, AirHeader.TARGET_ALIGNMENT);
+
+        const local_extra = try allocator.alloc(u32, extra_count);
+        defer allocator.free(local_extra);
+        const local_extra_bytes_read = try reader.readAll(@ptrCast(local_extra));
+        std.debug.assert(local_extra_bytes_read == extra_count * @sizeOf(@TypeOf(local_extra[0])));
+        try alignReader(reader, local_extra_bytes_read, AirHeader.TARGET_ALIGNMENT);
+
+        // NOTE: InternPool.Local.Shared does not provide mutable APIs like Local does.
+        // Instead, internal knowledge of its ABI is used here to construct it directly in memory.
+        // => **not** stable wrt. InternPool Shared data structure changes!
+        // There probably is a simpler way that I haven't found. Suggestions are welcome.
+        {
+            // NOTE: ip.getLocalShared(thread_id) cannot be used since it returns an immutable pointer.
+            const shared_items = &ip.locals[@intFromEnum(thread_id)].shared.items;
+            const ItemList = @TypeOf(shared_items.*);
+
+            // NOTE: unstable internal type used here!
+            // => helper for correct alignment only.
+            // ip.locals.shared.items stores a pointer to the bytes array **after** the header only!
+            // Internally, InternPool.Item functions then subtract the header size from the pointer to get access to the header.
+            const ListInternalType = extern struct {
+                pub const data_alignment = @alignOf(InternPool.Item);
+                pub const header_byte_size = std.mem.alignForward(usize, @sizeOf(ItemList.Header), data_alignment);
+                header: ItemList.Header,
+                bytes: [0]u8 align(data_alignment), // 0 element array for alignment. Data resides here in allocated block.
+            };
+
+            const new_data_size = ListInternalType.header_byte_size + @TypeOf(shared_items.view()).capacityInBytes(item_count);
+            local_shared_data = try allocator.alignedAlloc(u8, @alignOf(ItemList), new_data_size); // FIXME(pwr): use explicit alignment again
+            errdefer allocator.free(local_shared_data);
+
+            const internal_type: *ListInternalType = @ptrCast(local_shared_data);
+            internal_type.header = .{ .capacity = @intCast(item_count) }; // 32bit count, u64 only due to serialization type.
+            // NOTE: ip.locals.shared.items stores a pointer to the bytes array **after** the header only!
+            shared_items.* = .{ .bytes = &internal_type.bytes };
+
+            const view = shared_items.view();
+            const mutable: *@TypeOf(view) = @constCast(&view);
+            for (tags, data, 0..) |tag, variant, i| mutable.set(i, .{ .tag = tag, .data = variant });
+        }
+    }
+
+    // NOTE(pwr): calling ip.dump() crashes with multithreading => not sure it it's related to reconstruction.
+    // It also crashes for me when using --verbose-intern-pool without modifying the compiler.
+    // if (builtin.single_threaded) {
+    //     ip.dump();
+    //     ip.dumpGenericInstances(allocator);
+    // }
+
+    return .{
+        .intern_pool = ip,
+        .local_shared_data = local_shared_data.?,
     };
 }
 
