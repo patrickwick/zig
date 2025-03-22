@@ -77,12 +77,5 @@ pub fn main() !void {
         try out.print("\n\n", .{});
     }
 
-    // Fake compilation unit with imported intern pool to use compiler APIs.
-    // TODO(pwr): integrate this directly into the import function?
-    var zcu_fake = try air_lib.FakeCompilationUnit.init(arena_allocator);
-    defer zcu_fake.deinit();
-    const zcu: *air_lib.Zcu = zcu_fake.compilation.zcu.?;
-    const zcu_main_thread = air_lib.Zcu.PerThread{ .zcu = zcu, .tid = .main };
-
-    air_lib.print_air.dump(zcu_main_thread, air_import.air, air_import.liveness);
+    air_lib.print_air.dump(air_import.zcu_main_thread, air_import.air, air_import.liveness);
 }

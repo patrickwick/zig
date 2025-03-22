@@ -273,6 +273,9 @@ pub const AirImported = struct {
     /// Instructions owned by the caller that needs to free it using the provided allocator.
     instructions_owned: std.MultiArrayList(Air.Inst),
     liveness: ?Liveness,
+    zcu_fake: FakeCompilationUnit,
+    zcu: *Zcu,
+    zcu_main_thread: Zcu.PerThread,
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *@This()) void {
@@ -285,6 +288,8 @@ pub const AirImported = struct {
 
         self.allocator.free(self.local_shared_data);
         self.intern_pool.deinit(self.allocator);
+
+        self.zcu_fake.deinit();
     }
 };
 
@@ -469,6 +474,10 @@ pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImp
         break :intern_pool ip;
     };
 
+    const zcu_fake = try FakeCompilationUnit.init(allocator);
+    const zcu = zcu_fake.compilation.zcu.?;
+    const zcu_main_thread = Zcu.PerThread{ .zcu = zcu, .tid = .main };
+
     return .{
         .header = header,
         .function_name = function_name,
@@ -480,6 +489,9 @@ pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImp
         .local_shared_data = local_shared_data.?,
         .instructions_owned = instructions,
         .liveness = liveness,
+        .zcu_fake = zcu_fake,
+        .zcu = zcu,
+        .zcu_main_thread = zcu_main_thread,
         .allocator = allocator,
     };
 }
