@@ -2,6 +2,8 @@
 ZIG=zig
 ZIG_LIB_DIR=./lib
 
+DEBUGGER=gdb
+
 all: test-integration
 
 # Most important flags from `zig build --help`:
@@ -13,17 +15,29 @@ all: test-integration
 .PHONY: build
 build:
 	time ${ZIG} build \
-		-Ddebug-extensions=true \
 		-Doptimize=Debug \
+		-Ddebug-extensions=true \
+		-Dlog=true \
 		-Dno-lib \
 		-Duse-llvm=false \
 		-Ddev=x86_64-linux \
 		--zig-lib-dir ${ZIG_LIB_DIR} \
 		--summary all
 
-# ./zig-out/bin/zig build-obj --verbose-air ./test.zig 2&> test.air
+# ./zig-out/bin/zig build-obj ./test.zig
 .PHONY: test-unit
 test-unit:
+	time ${ZIG} build test-unit \
+		-Ddebug-extensions=true \
+		-Dno-lib \
+		-Dno-bin \
+		-Duse-llvm=false \
+		-Ddev=x86_64-linux \
+		--zig-lib-dir ${ZIG_LIB_DIR} \
+		--summary all
+
+.PHONY: test-debug
+test-debug:
 	time ${ZIG} build test-unit \
 		-Ddebug-extensions=true \
 		-Dno-lib \

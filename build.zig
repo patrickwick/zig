@@ -535,6 +535,7 @@ pub fn build(b: *std.Build) !void {
     });
     unit_tests.root_module.addOptions("build_options", exe_options);
     unit_tests_step.dependOn(&b.addRunArtifact(unit_tests).step);
+    unit_tests_step.dependOn(&b.addInstallArtifact(unit_tests, .{}).step);
 
     test_step.dependOn(tests.addCompareOutputTests(b, test_filters, optimization_modes));
     test_step.dependOn(tests.addStandaloneTests(

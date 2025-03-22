@@ -186,6 +186,11 @@ fn exportAirWriter(writer: anytype, zcu_per_thread: Zcu.PerThread, air: Air, liv
         // try alignWriter(writer, l.special.len * @sizeOf(@TypeOf(l.special[0])), AirHeader.TARGET_ALIGNMENT);
     }
 
+    // TODO(pwr): the InternPool.List data structures store their header inside the first few bytes of the buffer itself.
+    // => why not just dump the whole thing?
+    // NOTE: uses internal knowledge of the InternPool ABI that:
+    // * items.bytes are layout out like a MultiArrayList including its reserved capacity bytes (items.view()).
+    // * items.bytes does not include the header bytes though -> add the header bytes in front too.
     {
         var intern_pool = zcu_per_thread.zcu.intern_pool;
         const ip_local = intern_pool.getLocal(.main);
@@ -207,6 +212,38 @@ fn exportAirWriter(writer: anytype, zcu_per_thread: Zcu.PerThread, air: Air, liv
             try writer.writeAll(@ptrCast(data));
             const data_size = data.len * @sizeOf(@TypeOf(data[0]));
             try alignWriter(writer, data_size, AirHeader.TARGET_ALIGNMENT);
+        }
+
+        // TODO(pwr): remove experiment for single write including header and capacity bytes.
+        // => splitting the tags and data explicitely is still be better for debugging and not dumping capacity placeholders.
+        if (false) {
+            const items = ip_local.getMutableItems(gpa);
+            const view = items.view();
+            const item_header = items.list.header();
+            const data: [*]u8 = @ptrCast(items.list.header());
+
+            const header_size = 4;
+            const tag_size = 1;
+            const data_size = 4;
+            const abc = header_size + @TypeOf(view).capacityInBytes(view.capacity);
+            const def = header_size + items.view().capacity * (tag_size + data_size);
+            std.debug.assert(abc == def);
+
+            std.log.err("Header: {any} 0x{x} 0x{x}", .{ item_header, @intFromPtr(item_header), @intFromPtr(items.list.bytes) });
+            // std.log.err("Raw data: {any}", .{data[0..item_header.capacity]});
+            std.log.err("Raw data: {any}", .{data[0..abc]});
+
+            const data_view: [*]u8 = @ptrCast(items.view().bytes);
+            // std.log.err("Raw data view: {any}", .{data_view[0..items.view().len]});
+            std.log.err("Raw data view: {any}", .{data_view[0..abc]});
+
+            const tags = items.view().items(.tag);
+            const tag_data: [*]u8 = @ptrCast(tags.ptr);
+            std.log.err("Raw tags: {any}", .{tag_data[0 .. tags.len * tag_size]});
+
+            const item_data = items.view().items(.data);
+            const item_data_data: [*]u8 = @ptrCast(item_data.ptr);
+            std.log.err("Raw data data: {any}", .{item_data_data[0 .. item_data.len * data_size]});
         }
 
         // Local mutable extra.
@@ -331,6 +368,7 @@ pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImp
         };
     };
 
+    // TODO(pwr): try to remove the InternPool code changes to overwrite the values.
     const intern_pool = intern_pool: {
         // NOTE(pwr): hardcoded for a single main thread with ID 0.
         const thread_id = Zcu.PerThread.Id.main;
@@ -382,11 +420,11 @@ pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImp
 
         // Local shared.
         {
-            const local_shared = ip.getLocalShared(thread_id);
+            // const local_shared = ip.getLocalShared(thread_id);
             const item_count = header.intern_local_shared_item_count;
             const extra_count = header.intern_local_shared_extra_count;
 
-            // TODO(pwr): no need to copy -> read and append directly
+            // TODO(pwr): no need to copy -> directly read into resized multi array
             const tags = try allocator.alloc(InternPool.Tag, item_count);
             defer allocator.free(tags);
             const local_tag_bytes_read = try reader.readAll(@ptrCast(tags));
@@ -406,21 +444,80 @@ pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImp
             std.debug.assert(local_extra_bytes_read == extra_count * @sizeOf(@TypeOf(local_extra[0])));
             try alignReader(reader, local_extra_bytes_read, AirHeader.TARGET_ALIGNMENT);
 
-            // TODO(pwr): append data
-            _ = local_shared;
-            // {
-            //     var local_mutable_items = local_shared.items.acquire().view();
-            //     try local_mutable_items.ensureUnusedCapacity(allocator, tags.len);
-            //     for (tags, data) |tag, variant| local_mutable_items.appendAssumeCapacity(.{ .tag = tag, .data = variant });
-            // }
+            // NOTE: InternPool.Local.Shared does not provide mutable APIs like Local does.
+            // Instead, internal knowledge of its ABI is used here to construct it directly in memory.
+            // => **not** stable wrt. InternPool Shared data structure changes!
+            // There probably is a simpler way that I haven't found. Suggestions are welcome.
+            {
+                // NOTE: ip.getLocalShared(thread_id) cannot be used since it returns an immutable pointer.
+                const shared_items = &ip.locals[@intFromEnum(thread_id)].shared.items;
+                const ItemList = @TypeOf(shared_items.*);
 
-            // {
-            //     var local_mutable_extra = local_shared.extra.acquire().view();
-            //     try local_mutable_extra.ensureUnusedCapacity(allocator, local_extra.len);
-            //     for (local_extra) |e| local_mutable_extra.appendAssumeCapacity(.{e});
-            // }
+                // NOTE: unstable internal type used here!
+                // => helper for correct alignment only.
+                // ip.locals.shared.items stores a pointer to the bytes array **after** the header only!
+                // Internally, InternPool.Item functions then subtract the header size from the pointer to get access to the header.
+                const ListInternalType = extern struct {
+                    pub const data_alignment = @alignOf(InternPool.Item);
+                    pub const header_byte_size = std.mem.alignForward(usize, @sizeOf(ItemList.Header), data_alignment);
+                    header: ItemList.Header,
+                    bytes: [0]u8 align(data_alignment), // 0 element array for alignment. Data resides here in allocated block.
+                };
+
+                const new_data_size = ListInternalType.header_byte_size + @TypeOf(shared_items.view()).capacityInBytes(item_count);
+                const new_data = try allocator.alignedAlloc(u8, @alignOf(ItemList), new_data_size);
+
+                // TODO: remove debug
+                @memset(new_data[0..ListInternalType.header_byte_size], 'H');
+                @memset(new_data[ListInternalType.header_byte_size..], 'X');
+                new_data[ListInternalType.header_byte_size] = 0xaa;
+                new_data[new_data_size - 1] = 0xaa;
+
+                const internal_type: *ListInternalType = @ptrCast(new_data);
+                internal_type.header = .{ .capacity = @intCast(item_count) }; // 32bit count, u64 only due to serialization type.
+                std.log.err("new_data with header: {any}", .{new_data});
+
+                // TODO: fill the item buffer with a multi array list:
+                // const items: *std.MultiArrayList(InternPool.Item) = @ptrCast(&new_data[ListInternalType.header_byte_size]);
+                // _ = items;
+
+                // NOTE: ip.locals.shared.items stores a pointer to the bytes array **after** the header only!
+                shared_items.* = .{ .bytes = &internal_type.bytes };
+
+                std.debug.assert(false);
+
+                // const items = ip_local.getMutableItems(gpa);
+                // const view = items.view();
+                // const item_header = items.list.header();
+                // const data: [*]u8 = @ptrCast(items.list.header());
+
+                // const header_size = 4;
+                // const tag_size = 1;
+                // const data_size = 4;
+                // const abc = header_size + @TypeOf(view).capacityInBytes(view.capacity);
+                // const def = header_size + items.view().capacity * (tag_size + data_size);
+                // std.debug.assert(abc == def);
+
+                // std.log.err("Header: {any} 0x{x} 0x{x}", .{ item_header, @intFromPtr(item_header), @intFromPtr(items.list.bytes) });
+                // // std.log.err("Raw data: {any}", .{data[0..item_header.capacity]});
+                // std.log.err("Raw data: {any}", .{data[0..abc]});
+
+                // const data_view: [*]u8 = @ptrCast(items.view().bytes);
+                // // std.log.err("Raw data view: {any}", .{data_view[0..items.view().len]});
+                // std.log.err("Raw data view: {any}", .{data_view[0..abc]});
+
+                // const tags = items.view().items(.tag);
+                // const tag_data: [*]u8 = @ptrCast(tags.ptr);
+                // std.log.err("Raw tags: {any}", .{tag_data[0 .. tags.len * tag_size]});
+
+                // const item_data = items.view().items(.data);
+                // const item_data_data: [*]u8 = @ptrCast(item_data.ptr);
+                // std.log.err("Raw data data: {any}", .{item_data_data[0 .. item_data.len * data_size]});
+            }
         }
 
+        // NOTE(pwr): calling ip.dump() will crash => not sure it it's related to reconstruction.
+        // It also crashes for me when using --verbose-intern-pool without modifying the compiler.
         break :intern_pool ip;
     };
 

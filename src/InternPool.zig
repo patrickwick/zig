@@ -1054,7 +1054,7 @@ pub const Local = struct {
         namespaces: BucketListMutate,
     } align(std.atomic.cache_line),
 
-    const Shared = struct {
+    pub const Shared = struct {
         items: List(Item),
         extra: Extra,
         limbs: Limbs,
@@ -1117,7 +1117,7 @@ pub const Local = struct {
         };
     };
 
-    fn List(comptime Elem: type) type {
+    pub fn List(comptime Elem: type) type {
         assert(@typeInfo(Elem) == .@"struct");
         return struct {
             bytes: [*]align(@alignOf(Elem)) u8,
@@ -1353,7 +1353,7 @@ pub const Local = struct {
                 @atomicStore([*]align(@alignOf(Elem)) u8, &list.bytes, new_list.bytes, .release);
             }
 
-            const Header = extern struct {
+            pub const Header = extern struct {
                 capacity: u32,
             };
             fn header(list: ListSelf) *Header {
