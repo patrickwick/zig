@@ -2,6 +2,9 @@
 ZIG=zig
 ZIG_LIB_DIR=./lib
 
+# TODO(pwr): reenable -> export/import only handles a single thread!
+ZIG_OPTIONS+=-Dsingle-threaded=true
+
 DEBUGGER=gdb
 
 all: test-integration
@@ -15,6 +18,7 @@ all: test-integration
 .PHONY: build
 build:
 	time ${ZIG} build \
+		${ZIG_OPTIONS} \
 		-Doptimize=Debug \
 		-Ddebug-extensions=true \
 		-Dlog=true \
@@ -28,6 +32,7 @@ build:
 .PHONY: test-unit
 test-unit:
 	time ${ZIG} build test-unit \
+		${ZIG_OPTIONS} \
 		-Ddebug-extensions=true \
 		-Dno-lib \
 		-Dno-bin \
@@ -39,6 +44,7 @@ test-unit:
 .PHONY: test-debug
 test-debug:
 	time ${ZIG} build test-unit \
+		${ZIG_OPTIONS} \
 		-Ddebug-extensions=true \
 		-Dno-lib \
 		-Dno-bin \
@@ -50,6 +56,7 @@ test-debug:
 .PHONY: test-watch
 test-watch:
 	time ${ZIG} build test-unit \
+		${ZIG_OPTIONS} \
 		-Dno-lib \
 		-Dno-bin \
 		-Duse-llvm=false \
@@ -69,6 +76,7 @@ test:
 .PHONY: release
 release:
 	time ${ZIG} build \
+		${ZIG_OPTIONS} \
 		-Ddebug-extensions=true \
 		-Doptimize=ReleaseFast \
 		-Duse-llvm=true \
@@ -80,6 +88,7 @@ release:
 .PHONY: incremental
 incremental:
 	${ZIG} build \
+		${ZIG_OPTIONS} \
 		-Ddebug-extensions=true \
 		-Dno-lib \
 		-Dno-bin \
@@ -92,6 +101,7 @@ incremental:
 .PHONY: incremental-bin
 incremental-bin:
 	${ZIG} build \
+		${ZIG_OPTIONS} \
 		-Ddebug-extensions=true \
 		-Dno-lib \
 		-Duse-llvm=false \

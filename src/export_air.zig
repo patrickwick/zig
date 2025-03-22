@@ -214,38 +214,6 @@ fn exportAirWriter(writer: anytype, zcu_per_thread: Zcu.PerThread, air: Air, liv
             try alignWriter(writer, data_size, AirHeader.TARGET_ALIGNMENT);
         }
 
-        // TODO(pwr): remove experiment for single write including header and capacity bytes.
-        // => splitting the tags and data explicitely is still be better for debugging and not dumping capacity placeholders.
-        if (false) {
-            const items = ip_local.getMutableItems(gpa);
-            const view = items.view();
-            const item_header = items.list.header();
-            const data: [*]u8 = @ptrCast(items.list.header());
-
-            const header_size = 4;
-            const tag_size = 1;
-            const data_size = 4;
-            const abc = header_size + @TypeOf(view).capacityInBytes(view.capacity);
-            const def = header_size + items.view().capacity * (tag_size + data_size);
-            std.debug.assert(abc == def);
-
-            std.log.err("Header: {any} 0x{x} 0x{x}", .{ item_header, @intFromPtr(item_header), @intFromPtr(items.list.bytes) });
-            // std.log.err("Raw data: {any}", .{data[0..item_header.capacity]});
-            std.log.err("Raw data: {any}", .{data[0..abc]});
-
-            const data_view: [*]u8 = @ptrCast(items.view().bytes);
-            // std.log.err("Raw data view: {any}", .{data_view[0..items.view().len]});
-            std.log.err("Raw data view: {any}", .{data_view[0..abc]});
-
-            const tags = items.view().items(.tag);
-            const tag_data: [*]u8 = @ptrCast(tags.ptr);
-            std.log.err("Raw tags: {any}", .{tag_data[0 .. tags.len * tag_size]});
-
-            const item_data = items.view().items(.data);
-            const item_data_data: [*]u8 = @ptrCast(item_data.ptr);
-            std.log.err("Raw data data: {any}", .{item_data_data[0 .. item_data.len * data_size]});
-        }
-
         // Local mutable extra.
         {
             const extra = ip_local.getMutableExtra(gpa).view().slice();
@@ -298,6 +266,7 @@ pub const AirImported = struct {
     function_name: []const u8,
     air: Air,
     intern_pool: InternPool,
+    local_shared_data: []align(8) u8, // FIXME(pwr): explicit shared list alignment stored in the buffer.
     /// Instructions owned by the caller that needs to free it using the provided allocator.
     instructions_owned: std.MultiArrayList(Air.Inst),
     liveness: ?Liveness,
@@ -307,8 +276,11 @@ pub const AirImported = struct {
         self.instructions_owned.deinit(self.allocator);
         self.allocator.free(self.function_name);
         self.allocator.free(self.air.extra);
+
         if (self.liveness) |l| self.allocator.free(l.tomb_bits);
         if (self.liveness) |l| self.allocator.free(l.extra);
+
+        self.allocator.free(self.local_shared_data);
         self.intern_pool.deinit(self.allocator);
     }
 };
@@ -368,6 +340,8 @@ pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImp
         };
     };
 
+    var local_shared_data: ?[]align(8) u8 = null; // FIXME(pwr): explicit shared list alignment stored in the buffer.
+
     // TODO(pwr): try to remove the InternPool code changes to overwrite the values.
     const intern_pool = intern_pool: {
         // NOTE(pwr): hardcoded for a single main thread with ID 0.
@@ -407,12 +381,14 @@ pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImp
 
             {
                 const local_mutable_items = local.getMutableItems(allocator);
-                try local_mutable_items.ensureUnusedCapacity(tags.len);
+                local_mutable_items.shrinkRetainingCapacity(0); // NOTE: delete intern pool statically known items added in init.
+                try local_mutable_items.ensureTotalCapacity(tags.len);
                 for (tags, data) |tag, variant| local_mutable_items.appendAssumeCapacity(.{ .tag = tag, .data = variant });
             }
 
             {
                 const local_mutable_extra = local.getMutableExtra(allocator);
+                local_mutable_extra.shrinkRetainingCapacity(0); // NOTE: delete intern pool statically known items added in init.
                 try local_mutable_extra.ensureUnusedCapacity(local_extra.len);
                 for (local_extra) |e| local_mutable_extra.appendAssumeCapacity(.{e});
             }
@@ -465,54 +441,17 @@ pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImp
                 };
 
                 const new_data_size = ListInternalType.header_byte_size + @TypeOf(shared_items.view()).capacityInBytes(item_count);
-                const new_data = try allocator.alignedAlloc(u8, @alignOf(ItemList), new_data_size);
+                local_shared_data = try allocator.alignedAlloc(u8, @alignOf(ItemList), new_data_size); // FIXME(pwr): use explicit alignment again
+                errdefer allocator.free(local_shared_data);
 
-                // TODO: remove debug
-                @memset(new_data[0..ListInternalType.header_byte_size], 'H');
-                @memset(new_data[ListInternalType.header_byte_size..], 'X');
-                new_data[ListInternalType.header_byte_size] = 0xaa;
-                new_data[new_data_size - 1] = 0xaa;
-
-                const internal_type: *ListInternalType = @ptrCast(new_data);
+                const internal_type: *ListInternalType = @ptrCast(local_shared_data);
                 internal_type.header = .{ .capacity = @intCast(item_count) }; // 32bit count, u64 only due to serialization type.
-                std.log.err("new_data with header: {any}", .{new_data});
-
-                // TODO: fill the item buffer with a multi array list:
-                // const items: *std.MultiArrayList(InternPool.Item) = @ptrCast(&new_data[ListInternalType.header_byte_size]);
-                // _ = items;
-
                 // NOTE: ip.locals.shared.items stores a pointer to the bytes array **after** the header only!
                 shared_items.* = .{ .bytes = &internal_type.bytes };
 
-                std.debug.assert(false);
-
-                // const items = ip_local.getMutableItems(gpa);
-                // const view = items.view();
-                // const item_header = items.list.header();
-                // const data: [*]u8 = @ptrCast(items.list.header());
-
-                // const header_size = 4;
-                // const tag_size = 1;
-                // const data_size = 4;
-                // const abc = header_size + @TypeOf(view).capacityInBytes(view.capacity);
-                // const def = header_size + items.view().capacity * (tag_size + data_size);
-                // std.debug.assert(abc == def);
-
-                // std.log.err("Header: {any} 0x{x} 0x{x}", .{ item_header, @intFromPtr(item_header), @intFromPtr(items.list.bytes) });
-                // // std.log.err("Raw data: {any}", .{data[0..item_header.capacity]});
-                // std.log.err("Raw data: {any}", .{data[0..abc]});
-
-                // const data_view: [*]u8 = @ptrCast(items.view().bytes);
-                // // std.log.err("Raw data view: {any}", .{data_view[0..items.view().len]});
-                // std.log.err("Raw data view: {any}", .{data_view[0..abc]});
-
-                // const tags = items.view().items(.tag);
-                // const tag_data: [*]u8 = @ptrCast(tags.ptr);
-                // std.log.err("Raw tags: {any}", .{tag_data[0 .. tags.len * tag_size]});
-
-                // const item_data = items.view().items(.data);
-                // const item_data_data: [*]u8 = @ptrCast(item_data.ptr);
-                // std.log.err("Raw data data: {any}", .{item_data_data[0 .. item_data.len * data_size]});
+                const view = shared_items.view();
+                const mutable: *@TypeOf(view) = @constCast(&view);
+                for (tags, data, 0..) |tag, variant, i| mutable.set(i, .{ .tag = tag, .data = variant });
             }
         }
 
@@ -529,6 +468,7 @@ pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImp
             .extra = extra,
         },
         .intern_pool = intern_pool,
+        .local_shared_data = local_shared_data.?,
         .instructions_owned = instructions,
         .liveness = liveness,
         .allocator = allocator,
@@ -746,12 +686,14 @@ test exportAir {
     try t.expectEqualSlices(u32, imported.liveness.?.extra, liveness.extra);
     try t.expectEqual(imported.liveness.?.special.count(), liveness.special.count());
 
-    const tags = imported.air.instructions.items(.tag);
-    const variants = imported.air.instructions.items(.data);
-    for (tags, variants, air.instructions.items(.tag), air.instructions.items(.data)) |tag, variant, expected_tag, expected_variant| {
-        try t.expectEqual(expected_tag, tag);
-        const DataType = *align(1) const u64;
-        try t.expectEqual(@as(DataType, @ptrCast(&expected_variant)).*, @as(DataType, @ptrCast(&variant)).*);
+    {
+        const tags = imported.air.instructions.items(.tag);
+        const variants = imported.air.instructions.items(.data);
+        for (tags, variants, air.instructions.items(.tag), air.instructions.items(.data)) |tag, variant, expected_tag, expected_variant| {
+            try t.expectEqual(expected_tag, tag);
+            const DataType = *align(1) const u64;
+            try t.expectEqual(@as(DataType, @ptrCast(&expected_variant)).*, @as(DataType, @ptrCast(&variant)).*);
+        }
     }
 
     try t.expectEqualSlices(u32, air.extra, imported.air.extra);
@@ -759,6 +701,37 @@ test exportAir {
     const main_body_indexes = imported.air.getMainBody();
     try t.expectEqual(air.instructions.len, main_body_indexes.len);
     for (0..air.instructions.len, main_body_indexes) |expected_i, actual_i| try t.expectEqual(expected_i, @intFromEnum(actual_i));
+
+    try t.expectEqual(1, imported.intern_pool.locals.len);
+    try t.expectEqual(1, zcu_per_thread.zcu.intern_pool.locals.len);
+    {
+        const actual = imported.intern_pool.locals[0].getMutableItems(allocator).view();
+        const expected = zcu_per_thread.zcu.intern_pool.locals[0].getMutableItems(allocator).view();
+        try t.expectEqual(expected.len, actual.len);
+
+        for (actual.items(.tag), actual.items(.data), expected.items(.tag), expected.items(.data)) |tag, variant, expected_tag, expected_variant| {
+            try t.expectEqual(expected_tag, tag);
+            try t.expectEqual(expected_variant, variant);
+        }
+    }
+
+    {
+        const actual = imported.intern_pool.locals[0].shared.items.view();
+        const expected = zcu_per_thread.zcu.intern_pool.locals[0].shared.items.view();
+        try t.expectEqual(expected.len, actual.len);
+
+        for (actual.items(.tag), actual.items(.data), expected.items(.tag), expected.items(.data)) |tag, variant, expected_tag, expected_variant| {
+            try t.expectEqual(expected_tag, tag);
+            try t.expectEqual(expected_variant, variant);
+        }
+    }
+
+    {
+        const actual = imported.intern_pool.locals[0].getMutableExtra(allocator).view();
+        const expected = zcu_per_thread.zcu.intern_pool.locals[0].getMutableExtra(allocator).view();
+        try t.expectEqual(expected.len, actual.len);
+        for (actual.items(.@"0"), expected.items(.@"0")) |actual_extra, expected_extra| try t.expectEqual(expected_extra, actual_extra);
+    }
 }
 
 test "Pack AIR functions into one buffer" {
