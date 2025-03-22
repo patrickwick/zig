@@ -19,6 +19,8 @@ const Air = air_lib.Air;
 /// * detect division by zero as a simple PoC using symbolic execution.
 /// * TODO(pwr): maybe integrate CLR to perform additional checks -> would be nice to know how fast it is.
 pub fn main() !void {
+    air_lib.InternPool.ANALYZER = true; // FIXME(pwr): remove. Temporarirly disabled functions that are not yet supported.
+
     const stdout = std.io.getStdOut();
     const out = stdout.writer();
 
@@ -65,6 +67,14 @@ pub fn main() !void {
         std.log.err("target function \"{s}\" not found in AIR file \"{s}\"", .{ target_function, air_file_path });
         return error.TargetFunctionNotFound;
     };
+
+    // TODO(pwr): some of the internal functions are skipped due to missing exported data.
+    {
+        try out.print("InternPool dump:\n", .{});
+        air_import.intern_pool.dump();
+        try out.print("InternPool dumpGenericInstances:", .{});
+        air_import.intern_pool.dumpGenericInstances(arena_allocator);
+    }
 
     const main_body_indexes = air_import.air.getMainBody();
     const liveness = air_import.liveness orelse @panic("Liveness is required");
@@ -194,6 +204,8 @@ pub fn main() !void {
                     const ty = air_lib.Type.fromInterned(import.intern_pool.indexToKey(ip_index).typeOf());
                     const value = air_lib.Value.fromInterned(ip_index);
 
+                    // FIXME(pwr): the imported intern pool does not include all functions since it's exported at the time of "test.main" analysis.
+                    // => intern pool is still filled with data after that and referenced here.
                     // TODO(pwr): extract data from imported intern pool, so this succeeds:
                     // => local shared items are required: ip.getLocalShared(unwrapped.tid).items.acquire().view().slice()
                     try writer.print("<{}, {}>", .{ ty.fmt(pt), value.fmtValue(pt) });

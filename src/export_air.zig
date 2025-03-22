@@ -137,6 +137,8 @@ var air_export_counter: usize = 0;
 /// Native endianness only - assumed to be used on the same machine in a different process.
 /// This data can also be written to a ELF section to be used like a debug format but for static analysis.
 pub fn exportAir(zcu_per_thread: Zcu.PerThread, air: Air, liveness: ?Liveness, function_name: []const u8) void {
+    if (comptime !builtin.single_threaded) @compileError("Export AIR is only supported in a single threaded build!");
+
     errdefer @panic("exportAir failed"); // TODO: handle properly
 
     // FIXME(pwr): the intern pool is shared across all functions, so exporting this for each function is a huge waste.
@@ -288,6 +290,8 @@ pub const AirImported = struct {
 // TODO: return optional to indicate end of stream without an error.
 // TODO: require a seekable stream to ensure that the correct bytes are consumed?
 pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImported {
+    if (comptime !builtin.single_threaded) @compileError("Import AIR is only supported in a single threaded build!");
+
     const header = try reader.readStruct(AirHeader);
     if (header.magic != AirHeader.MAGIC) return error.InvalidMagicValue;
 
@@ -455,8 +459,12 @@ pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !AirImp
             }
         }
 
-        // NOTE(pwr): calling ip.dump() will crash => not sure it it's related to reconstruction.
+        // NOTE(pwr): calling ip.dump() crashes with multithreading => not sure it it's related to reconstruction.
         // It also crashes for me when using --verbose-intern-pool without modifying the compiler.
+        if (builtin.single_threaded) {
+            ip.dump();
+            ip.dumpGenericInstances(allocator);
+        }
         break :intern_pool ip;
     };
 

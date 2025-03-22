@@ -6,6 +6,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const single_threaded = b.option(bool, "single-threaded", "Build artifacts that run in single threaded mode");
+
     // NOTE: compiler options required to create a fake Zcu compilation unit.
     const compiler_options = b.addOptions();
     compiler_options.addOption(bool, "have_llvm", USE_LLVM);
@@ -21,6 +23,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("../src/export_air.zig"),
         .target = target,
         .optimize = optimize,
+        .single_threaded = single_threaded,
     });
     compiler_module.addOptions("build_options", compiler_options);
 
@@ -28,6 +31,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/air.zig"),
         .target = target,
         .optimize = optimize,
+        .single_threaded = single_threaded,
     });
     air_module.addImport("compiler", compiler_module);
 
@@ -36,6 +40,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .single_threaded = single_threaded,
     });
     exe_module.addImport("air", air_module);
 
@@ -43,6 +48,7 @@ pub fn build(b: *std.Build) void {
         .name = "analyzer",
         .root_module = exe_module,
         .use_llvm = USE_LLVM,
+        .single_threaded = single_threaded,
     });
     b.installArtifact(exe);
 
@@ -66,12 +72,14 @@ pub fn build(b: *std.Build) void {
     const lib_unit_tests = b.addTest(.{
         .root_module = air_module,
         .use_llvm = USE_LLVM,
+        .single_threaded = single_threaded,
     });
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
 
     const exe_unit_tests = b.addTest(.{
         .root_module = exe_module,
         .use_llvm = USE_LLVM,
+        .single_threaded = single_threaded,
     });
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
 

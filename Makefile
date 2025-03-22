@@ -117,7 +117,7 @@ xxd:
 
 .PHONY: analyze
 analyze:
-	cd ./analyzer && zig build run
+	cd ./analyzer && zig build run ${ZIG_OPTIONS}
 
 .PHONY: test-integration
 test-integration:

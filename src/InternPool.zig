@@ -1,6 +1,8 @@
 //! All interned objects have both a value and a type.
 //! This data structure is self-contained.
 
+pub var ANALYZER = false;
+
 /// One item per thread, indexed by `tid`, which is dense and unique per thread.
 locals: []Local,
 /// Length must be a power of two and represents the number of simultaneous
@@ -1361,7 +1363,8 @@ pub const Local = struct {
             }
             pub fn view(list: ListSelf) View {
                 const capacity = list.header().capacity;
-                assert(capacity > 0); // optimizes `MultiArrayList.Slice.items`
+                // FIXME(pwr): asserts on ip.dump() in analysis code for some reason...
+                // assert(capacity > 0); // optimizes `MultiArrayList.Slice.items`
                 return .{
                     .bytes = list.bytes,
                     .len = capacity,
@@ -1770,6 +1773,7 @@ pub const String = enum(u32) {
     }
 
     fn toOverlongSlice(string: String, ip: *const InternPool) []const u8 {
+        if (ANALYZER) return "TODO(pwr): NYI"; // TODO(pwr): NYI.
         const unwrapped_string = string.unwrap(ip);
         const strings = ip.getLocalShared(unwrapped_string.tid).strings.acquire();
         return strings.view().items(.@"0")[unwrapped_string.index..];
@@ -10870,6 +10874,8 @@ fn dumpStatsFallible(ip: *const InternPool, arena: Allocator) anyerror!void {
             items.items(.tag)[0..local.mutate.items.len],
             items.items(.data)[0..local.mutate.items.len],
         ) |tag, data| {
+            if (ANALYZER) break; // TODO(pwr): NYI.
+
             const gop = try counts.getOrPut(tag);
             if (!gop.found_existing) gop.value_ptr.* = .{};
             gop.value_ptr.count += 1;
@@ -11231,6 +11237,8 @@ pub fn dumpGenericInstancesFallible(ip: *const InternPool, allocator: Allocator)
     instances.sort(SortContext{ .values = instances.values() });
     var it = instances.iterator();
     while (it.next()) |entry| {
+        if (ANALYZER) break; // TODO(pwr): NYI.
+
         const generic_fn_owner_nav = ip.getNav(ip.funcDeclInfo(entry.key_ptr.*).owner_nav);
         try w.print("{} ({}): \n", .{ generic_fn_owner_nav.name.fmt(ip), entry.value_ptr.items.len });
         for (entry.value_ptr.items) |index| {
