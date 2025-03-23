@@ -11,8 +11,6 @@ pub const FakeCompilationUnit = compiler.FakeCompilationUnit;
 pub const InternPool = compiler.InternPool;
 pub const Liveness = compiler.Liveness;
 pub const print_air = compiler.print_air;
-pub const Type = compiler.Type;
-pub const Value = compiler.Value;
 pub const Zcu = compiler.Zcu;
 
 pub fn importAir(allocator: std.mem.Allocator, reader: std.io.AnyReader) !compiler.AirImported {
@@ -204,7 +202,7 @@ pub const DebugStatement = struct {
 };
 
 pub const Allocation = struct {
-    // type_ref: Type, // TODO(pwr): own decoupled typed, not compiler Type.
+    allocated_type: Type,
 };
 
 /// Expand AIR incrementally based on the raw AIR and InternPool data like a tokenizer would.
@@ -356,8 +354,7 @@ pub const AirExpansion = struct {
             .save_err_return_trace_index,
             => AirKey.no_operation,
 
-            // .alloc => .{ .allocation = .{ .type_ref = data.ty } },
-            .alloc => .{ .allocation = .{} },
+            .alloc => .{ .allocation = .{ .allocated_type = derefType(self, data.ty) } },
             .ret_ptr,
             .err_return_trace,
             .c_va_start,
@@ -485,25 +482,27 @@ pub const AirExpansion = struct {
     }
 
     fn derefOperand(self: *const @This(), operand_ref: Air.Inst.Ref) Operand {
+        // TODO(pwr): verify that checking the static types explicitely is not required.
         // Static type reserved in first AIR indexes.
-        if (@intFromEnum(operand_ref) < InternPool.static_len) return .{ .static_type = .from(operand_ref) };
-
-        // Otherwise interned type or instruction reference.
-        if (operand_ref.toInterned()) |ip_index| {
-            _ = self;
-            _ = ip_index;
-            // const ty = Type.fromInterned(self.ip.indexToKey(ip_index).typeOf());
-            // const type_name = ty.fmt(pt),
-            // const value = Value.fromInterned(ip_index).fmtValue(pt),
-            return .{ .intered = .{} };
-        }
-
-        // Instruction reference.
+        // if (@intFromEnum(operand_ref) < InternPool.static_len) return .{ .typ = .{ .static_type = .from(operand_ref) } };
+        // Or interned type.
+        if (operand_ref.toInterned()) |ip_index| return .{ .interned = self.ip.indexToKey(ip_index) };
+        // Or instruction reference.
         return .{ .instruction_ref = operand_ref.toIndex().? };
+    }
+
+    fn derefType(self: *const @This(), type_ref: compiler.Type) Type {
+        // TODO(pwr): verify that checking the static types explicitely is not required.
+        const ip_index = type_ref.toIntern();
+        return .{ .interned = self.ip.indexToKey(ip_index) };
     }
 };
 
-pub const Operand = union(enum) {
+// TODO(pwr): create an own decoupled type definition, so compiler internal types can change.
+// At a later point in time: direct InternPool indexToKey usage works very well for now.
+pub const Key = InternPool.Key;
+
+pub const Type = union(enum) {
     pub const StaticType = enum {
         invalid,
         u0_type,
@@ -702,12 +701,13 @@ pub const Operand = union(enum) {
         }
     };
 
-    pub const InternedOperation = struct {
-        // TODO(pwr): type, value
-    };
+    // static_type: StaticType,
+    interned: Key,
+};
 
-    static_type: StaticType,
-    intered: InternedOperation,
+pub const Operand = union(enum) {
+    typ: Type,
+    interned: Key,
     instruction_ref: Air.Inst.Index,
 };
 
