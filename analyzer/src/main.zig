@@ -73,7 +73,7 @@ pub fn main() !void {
     var iterator = air_lib.AirExpansion.init(&air_import.air, intern_pool, main_body[0]);
     var instruction: air_lib.AirKey = .start;
     while (instruction != .end_of_instructions) : (instruction = iterator.nextInstruction()) {
-        std.log.info("{s}", .{@tagName(instruction)});
+        std.log.info("{any}", .{instruction});
 
         switch (instruction) {
             else => {},

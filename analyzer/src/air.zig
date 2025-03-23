@@ -55,12 +55,145 @@ pub const AirKey = union(enum) {
 };
 
 pub const BinaryOperation = struct {
-    left_ref: Air.Inst.Ref,
-    right_ref: Air.Inst.Ref,
+    // NOTE: **not** using `Air.Inst.Tag` direclty to decouple enum values from compiler.
+    pub const Tag = enum {
+        invalid,
+
+        add,
+        add_optimized,
+        add_safe,
+        add_wrap,
+        add_sat,
+        sub,
+        sub_optimized,
+        sub_safe,
+        sub_wrap,
+        sub_sat,
+        mul,
+        mul_optimized,
+        mul_safe,
+        mul_wrap,
+        mul_sat,
+        div_float,
+        div_trunc,
+        div_floor,
+        div_exact,
+        rem,
+        mod,
+        bit_and,
+        bit_or,
+        xor,
+        cmp_lt,
+        cmp_lte,
+        cmp_eq,
+        cmp_gte,
+        cmp_gt,
+        cmp_neq,
+        bool_and,
+        bool_or,
+        store,
+        store_safe,
+        array_elem_val,
+        slice_elem_val,
+        ptr_elem_val,
+        shl,
+        shl_exact,
+        shl_sat,
+        shr,
+        shr_exact,
+        set_union_tag,
+        min,
+        max,
+        div_float_optimized,
+        div_trunc_optimized,
+        div_floor_optimized,
+        div_exact_optimized,
+        rem_optimized,
+        mod_optimized,
+        cmp_lt_optimized,
+        cmp_lte_optimized,
+        cmp_eq_optimized,
+        cmp_gte_optimized,
+        cmp_gt_optimized,
+        cmp_neq_optimized,
+        memcpy,
+        memset,
+        memset_safe,
+
+        pub fn from(tag: Air.Inst.Tag) @This() {
+            return switch (tag) {
+                .add => .add,
+                .add_optimized => .add_optimized,
+                .add_safe => .add_safe,
+                .add_wrap => .add_wrap,
+                .add_sat => .add_sat,
+                .sub => .sub,
+                .sub_optimized => .sub_optimized,
+                .sub_safe => .sub_safe,
+                .sub_wrap => .sub_wrap,
+                .sub_sat => .sub_sat,
+                .mul => .mul,
+                .mul_optimized => .mul_optimized,
+                .mul_safe => .mul_safe,
+                .mul_wrap => .mul_wrap,
+                .mul_sat => .mul_sat,
+                .div_float => .div_float,
+                .div_trunc => .div_trunc,
+                .div_floor => .div_floor,
+                .div_exact => .div_exact,
+                .rem => .rem,
+                .mod => .mod,
+                .bit_and => .bit_and,
+                .bit_or => .bit_or,
+                .xor => .xor,
+                .cmp_lt => .cmp_lt,
+                .cmp_lte => .cmp_lte,
+                .cmp_eq => .cmp_eq,
+                .cmp_gte => .cmp_gte,
+                .cmp_gt => .cmp_gt,
+                .cmp_neq => .cmp_neq,
+                .bool_and => .bool_and,
+                .bool_or => .bool_or,
+                .store => .store,
+                .store_safe => .store_safe,
+                .array_elem_val => .array_elem_val,
+                .slice_elem_val => .slice_elem_val,
+                .ptr_elem_val => .ptr_elem_val,
+                .shl => .shl,
+                .shl_exact => .shl_exact,
+                .shl_sat => .shl_sat,
+                .shr => .shr,
+                .shr_exact => .shr_exact,
+                .set_union_tag => .set_union_tag,
+                .min => .min,
+                .max => .max,
+                .div_float_optimized => .div_float_optimized,
+                .div_trunc_optimized => .div_trunc_optimized,
+                .div_floor_optimized => .div_floor_optimized,
+                .div_exact_optimized => .div_exact_optimized,
+                .rem_optimized => .rem_optimized,
+                .mod_optimized => .mod_optimized,
+                .cmp_lt_optimized => .cmp_lt_optimized,
+                .cmp_lte_optimized => .cmp_lte_optimized,
+                .cmp_eq_optimized => .cmp_eq_optimized,
+                .cmp_gte_optimized => .cmp_gte_optimized,
+                .cmp_gt_optimized => .cmp_gt_optimized,
+                .cmp_neq_optimized => .cmp_neq_optimized,
+                .memcpy => .memcpy,
+                .memset => .memset,
+                .memset_safe => .memset_safe,
+                else => .invalid,
+            };
+        }
+    };
+
+    operation: Tag,
+    left: Operand,
+    right: Operand,
 };
 
 pub const UnaryOperation = struct {
-    operand_ref: Air.Inst.Ref,
+    operand: Operand,
 };
 
 pub const NoOperation = void;
@@ -71,7 +204,7 @@ pub const DebugStatement = struct {
 };
 
 pub const Allocation = struct {
-    type_ref: Type,
+    // type_ref: Type, // TODO(pwr): own decoupled typed, not compiler Type.
 };
 
 /// Expand AIR incrementally based on the raw AIR and InternPool data like a tokenizer would.
@@ -170,12 +303,12 @@ pub const AirExpansion = struct {
             .memcpy,
             .memset,
             .memset_safe,
-            => key: {
-                const bin_op = data.bin_op;
-                break :key .{ .binary_operation = .{
-                    .left_ref = bin_op.lhs,
-                    .right_ref = bin_op.rhs,
-                } };
+            => .{
+                .binary_operation = .{
+                    .operation = .from(tag),
+                    .left = derefOperand(self, data.bin_op.lhs),
+                    .right = derefOperand(self, data.bin_op.rhs),
+                },
             },
 
             // Unary operations.
@@ -211,10 +344,7 @@ pub const AirExpansion = struct {
             .cmp_lt_errors_len,
             .set_err_return_trace,
             .c_va_end,
-            => key: {
-                const un_op = data.un_op;
-                break :key .{ .unary_operation = .{ .operand_ref = un_op } };
-            },
+            => .{ .unary_operation = .{ .operand = derefOperand(self, data.un_op) } },
 
             // No operations.
             .trap,
@@ -226,7 +356,8 @@ pub const AirExpansion = struct {
             .save_err_return_trace_index,
             => AirKey.no_operation,
 
-            .alloc => .{ .allocation = .{ .type_ref = data.ty } },
+            // .alloc => .{ .allocation = .{ .type_ref = data.ty } },
+            .alloc => .{ .allocation = .{} },
             .ret_ptr,
             .err_return_trace,
             .c_va_start,
@@ -309,7 +440,7 @@ pub const AirExpansion = struct {
             .dbg_arg_inline,
             => .unsupported, // TODO(pwr): NYI.
 
-            .dbg_stmt => .{ .debug_statement = .{ .line = data.dbg_stmt.line, .column = data.dbg_stmt.column } },
+            .dbg_stmt => .{ .debug_statement = .{ .line = data.dbg_stmt.line + 1, .column = data.dbg_stmt.column + 1 } },
 
             .struct_field_ptr => .unsupported, // TODO(pwr): NYI.
             .struct_field_val => .unsupported, // TODO(pwr): NYI.
@@ -352,6 +483,232 @@ pub const AirExpansion = struct {
 
         return self.get();
     }
+
+    fn derefOperand(self: *const @This(), operand_ref: Air.Inst.Ref) Operand {
+        // Static type reserved in first AIR indexes.
+        if (@intFromEnum(operand_ref) < InternPool.static_len) return .{ .static_type = .from(operand_ref) };
+
+        // Otherwise interned type or instruction reference.
+        if (operand_ref.toInterned()) |ip_index| {
+            _ = self;
+            _ = ip_index;
+            // const ty = Type.fromInterned(self.ip.indexToKey(ip_index).typeOf());
+            // const type_name = ty.fmt(pt),
+            // const value = Value.fromInterned(ip_index).fmtValue(pt),
+            return .{ .intered = .{} };
+        }
+
+        // Instruction reference.
+        return .{ .instruction_ref = operand_ref.toIndex().? };
+    }
+};
+
+pub const Operand = union(enum) {
+    pub const StaticType = enum {
+        invalid,
+        u0_type,
+        i0_type,
+        u1_type,
+        u8_type,
+        i8_type,
+        u16_type,
+        i16_type,
+        u29_type,
+        u32_type,
+        i32_type,
+        u64_type,
+        i64_type,
+        u80_type,
+        u128_type,
+        i128_type,
+        usize_type,
+        isize_type,
+        c_char_type,
+        c_short_type,
+        c_ushort_type,
+        c_int_type,
+        c_uint_type,
+        c_long_type,
+        c_ulong_type,
+        c_longlong_type,
+        c_ulonglong_type,
+        c_longdouble_type,
+        f16_type,
+        f32_type,
+        f64_type,
+        f80_type,
+        f128_type,
+        anyopaque_type,
+        bool_type,
+        void_type,
+        type_type,
+        anyerror_type,
+        comptime_int_type,
+        comptime_float_type,
+        noreturn_type,
+        anyframe_type,
+        null_type,
+        undefined_type,
+        enum_literal_type,
+        manyptr_u8_type,
+        manyptr_const_u8_type,
+        manyptr_const_u8_sentinel_0_type,
+        single_const_pointer_to_comptime_int_type,
+        slice_const_u8_type,
+        slice_const_u8_sentinel_0_type,
+        vector_16_i8_type,
+        vector_32_i8_type,
+        vector_16_u8_type,
+        vector_32_u8_type,
+        vector_8_i16_type,
+        vector_16_i16_type,
+        vector_8_u16_type,
+        vector_16_u16_type,
+        vector_4_i32_type,
+        vector_8_i32_type,
+        vector_4_u32_type,
+        vector_8_u32_type,
+        vector_2_i64_type,
+        vector_4_i64_type,
+        vector_2_u64_type,
+        vector_4_u64_type,
+        vector_4_f16_type,
+        vector_8_f16_type,
+        vector_2_f32_type,
+        vector_4_f32_type,
+        vector_8_f32_type,
+        vector_2_f64_type,
+        vector_4_f64_type,
+        optional_noreturn_type,
+        anyerror_void_error_union_type,
+        adhoc_inferred_error_set_type,
+        generic_poison_type,
+        empty_tuple_type,
+        undef,
+        zero,
+        zero_usize,
+        zero_u8,
+        one,
+        one_usize,
+        one_u8,
+        four_u8,
+        negative_one,
+        void_value,
+        unreachable_value,
+        null_value,
+        bool_true,
+        bool_false,
+        empty_tuple,
+        none,
+
+        pub fn from(tag: Air.Inst.Ref) @This() {
+            return switch (tag) {
+                .u0_type => .u0_type,
+                .i0_type => .i0_type,
+                .u1_type => .u1_type,
+                .u8_type => .u8_type,
+                .i8_type => .i8_type,
+                .u16_type => .u16_type,
+                .i16_type => .i16_type,
+                .u29_type => .u29_type,
+                .u32_type => .u32_type,
+                .i32_type => .i32_type,
+                .u64_type => .u64_type,
+                .i64_type => .i64_type,
+                .u80_type => .u80_type,
+                .u128_type => .u128_type,
+                .i128_type => .i128_type,
+                .usize_type => .usize_type,
+                .isize_type => .isize_type,
+                .c_char_type => .c_char_type,
+                .c_short_type => .c_short_type,
+                .c_ushort_type => .c_ushort_type,
+                .c_int_type => .c_int_type,
+                .c_uint_type => .c_uint_type,
+                .c_long_type => .c_long_type,
+                .c_ulong_type => .c_ulong_type,
+                .c_longlong_type => .c_longlong_type,
+                .c_ulonglong_type => .c_ulonglong_type,
+                .c_longdouble_type => .c_longdouble_type,
+                .f16_type => .f16_type,
+                .f32_type => .f32_type,
+                .f64_type => .f64_type,
+                .f80_type => .f80_type,
+                .f128_type => .f128_type,
+                .anyopaque_type => .anyopaque_type,
+                .bool_type => .bool_type,
+                .void_type => .void_type,
+                .type_type => .type_type,
+                .anyerror_type => .anyerror_type,
+                .comptime_int_type => .comptime_int_type,
+                .comptime_float_type => .comptime_float_type,
+                .noreturn_type => .noreturn_type,
+                .anyframe_type => .anyframe_type,
+                .null_type => .null_type,
+                .undefined_type => .undefined_type,
+                .enum_literal_type => .enum_literal_type,
+                .manyptr_u8_type => .manyptr_u8_type,
+                .manyptr_const_u8_type => .manyptr_const_u8_type,
+                .manyptr_const_u8_sentinel_0_type => .manyptr_const_u8_sentinel_0_type,
+                .single_const_pointer_to_comptime_int_type => .single_const_pointer_to_comptime_int_type,
+                .slice_const_u8_type => .slice_const_u8_type,
+                .slice_const_u8_sentinel_0_type => .slice_const_u8_sentinel_0_type,
+                .vector_16_i8_type => .vector_16_i8_type,
+                .vector_32_i8_type => .vector_32_i8_type,
+                .vector_16_u8_type => .vector_16_u8_type,
+                .vector_32_u8_type => .vector_32_u8_type,
+                .vector_8_i16_type => .vector_8_i16_type,
+                .vector_16_i16_type => .vector_16_i16_type,
+                .vector_8_u16_type => .vector_8_u16_type,
+                .vector_16_u16_type => .vector_16_u16_type,
+                .vector_4_i32_type => .vector_4_i32_type,
+                .vector_8_i32_type => .vector_8_i32_type,
+                .vector_4_u32_type => .vector_4_u32_type,
+                .vector_8_u32_type => .vector_8_u32_type,
+                .vector_2_i64_type => .vector_2_i64_type,
+                .vector_4_i64_type => .vector_4_i64_type,
+                .vector_2_u64_type => .vector_2_u64_type,
+                .vector_4_u64_type => .vector_4_u64_type,
+                .vector_4_f16_type => .vector_4_f16_type,
+                .vector_8_f16_type => .vector_8_f16_type,
+                .vector_2_f32_type => .vector_2_f32_type,
+                .vector_4_f32_type => .vector_4_f32_type,
+                .vector_8_f32_type => .vector_8_f32_type,
+                .vector_2_f64_type => .vector_2_f64_type,
+                .vector_4_f64_type => .vector_4_f64_type,
+                .optional_noreturn_type => .optional_noreturn_type,
+                .anyerror_void_error_union_type => .anyerror_void_error_union_type,
+                .adhoc_inferred_error_set_type => .adhoc_inferred_error_set_type,
+                .generic_poison_type => .generic_poison_type,
+                .empty_tuple_type => .empty_tuple_type,
+                .undef => .undef,
+                .zero => .zero,
+                .zero_usize => .zero_usize,
+                .zero_u8 => .zero_u8,
+                .one => .one,
+                .one_usize => .one_usize,
+                .one_u8 => .one_u8,
+                .four_u8 => .four_u8,
+                .negative_one => .negative_one,
+                .void_value => .void_value,
+                .unreachable_value => .unreachable_value,
+                .null_value => .null_value,
+                .bool_true => .bool_true,
+                .bool_false => .bool_false,
+                .empty_tuple => .empty_tuple,
+                .none => .none,
+                else => .invalid,
+            };
+        }
+    };
+
+    pub const InternedOperation = struct {
+        // TODO(pwr): type, value
+    };
+
+    static_type: StaticType,
+    intered: InternedOperation,
+    instruction_ref: Air.Inst.Index,
 };
 
 const t = std.testing;

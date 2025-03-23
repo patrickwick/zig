@@ -150,6 +150,7 @@ pub const AirHeader = extern struct {
 var air_export_counter: usize = 0;
 var intern_pool_export_counter: usize = 0;
 
+// FIXME(pwr): AIR export does not work in release mode - a flag probably filters the call out.
 /// Export AIR for all instructions. The main body can be filtered from the instruction indexes stored in extra data.
 /// Native endianness only - assumed to be used on the same machine in a different process.
 /// This data can also be written to a ELF section to be used like a debug format but for static analysis.
@@ -191,6 +192,8 @@ pub fn exportInternPool(intern_pool: *InternPool, allocator: std.mem.Allocator) 
     try exportInternPoolWriter(writer, intern_pool, allocator);
 }
 
+// TODO(pwr): extract this functionality from `Compilation.saveState` which already saves the intern pool state.
+// Is there a load equivalent or a save function for AIR already too?
 fn exportAirWriter(writer: anytype, zcu_per_thread: Zcu.PerThread, air: Air, liveness: ?Liveness, function_name: []const u8) !void {
     const header = AirHeader.init(air, liveness, function_name);
 
