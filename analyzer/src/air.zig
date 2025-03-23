@@ -57,6 +57,7 @@ pub const AirKey = union(enum) {
     no_operation: NoOperation,
     allocation: Allocation,
     debug_statement: DebugStatement,
+    debug_variable: DebugVariable,
 };
 
 pub const BinaryOperation = struct {
@@ -283,6 +284,11 @@ pub const NoOperation = void;
 pub const DebugStatement = struct {
     line: u32,
     column: u32,
+};
+
+pub const DebugVariable = struct {
+    operand: Operand,
+    name: []const u8,
 };
 
 pub const Allocation = struct {
@@ -530,7 +536,19 @@ pub const AirExpansion = struct {
             .dbg_var_ptr,
             .dbg_var_val,
             .dbg_arg_inline,
-            => .unsupported, // TODO(pwr): NYI.
+            => key: {
+                const operand = derefOperand(self, data.pl_op.operand);
+                const extra_string: Air.NullTerminatedString = @enumFromInt(data.pl_op.payload);
+                // std.zig.fmtEscapes(name.toSlice(self.air.*)); // TODO(pwr): escape.
+                const name = extra_string.toSlice(self.air.*);
+
+                break :key .{
+                    .debug_variable = .{
+                        .operand = operand,
+                        .name = name,
+                    },
+                };
+            },
 
             .dbg_stmt => .{ .debug_statement = .{ .line = data.dbg_stmt.line + 1, .column = data.dbg_stmt.column + 1 } },
 

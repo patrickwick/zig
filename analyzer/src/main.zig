@@ -56,24 +56,15 @@ pub fn main() !void {
     air_import.zcu_main_thread.zcu.intern_pool = intern_pool.*;
 
     // TODO(pwr): some of the internal functions are skipped due to missing exported data.
-    if (false) {
-        try out.print("InternPool dump:\n", .{});
-        intern_pool.dump();
-        try out.print("InternPool dumpGenericInstances:", .{});
-        intern_pool.dumpGenericInstances(arena_allocator);
-        try out.print("\n\n", .{});
-    }
-
-    const main_body = air_import.air.getMainBody();
-
-    // TODO(pwr): some of the internal functions are skipped due to missing exported data.
     air_lib.print_air.dump(air_import.zcu_main_thread, air_import.air, air_import.liveness);
 
-    std.log.info("Iteration:", .{});
+    const main_body = air_import.air.getMainBody();
+    try out.print("Main body instructions:\n{any}\n", .{main_body});
+
     var iterator = air_lib.AirExpansion.init(&air_import.air, intern_pool, main_body[0]);
     var instruction = iterator.get();
     while (true) : (instruction = iterator.nextInstruction()) {
-        std.log.info("{any}", .{instruction});
+        try out.print("{any}\n", .{instruction});
 
         switch (instruction.key) {
             .end_of_instructions => break,
