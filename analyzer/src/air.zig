@@ -38,6 +38,13 @@ pub fn importInternPool(allocator: std.mem.Allocator, reader: std.io.AnyReader) 
     return try compiler.importInternPool(allocator, reader);
 }
 
+pub const Instruction = struct {
+    pub const Index = @typeInfo(Air.Inst.Index).@"enum".tag_type;
+
+    index: Index,
+    key: AirKey,
+};
+
 pub const AirKey = union(enum) {
     /// Initial key.
     start: void,
@@ -191,6 +198,83 @@ pub const BinaryOperation = struct {
 };
 
 pub const UnaryOperation = struct {
+    // NOTE: **not** using `Air.Inst.Tag` direclty to decouple enum values from compiler.
+    pub const Tag = enum {
+        invalid,
+
+        is_null,
+        is_non_null,
+        is_null_ptr,
+        is_non_null_ptr,
+        is_err,
+        is_non_err,
+        is_err_ptr,
+        is_non_err_ptr,
+        ret,
+        ret_safe,
+        ret_load,
+        is_named_enum_value,
+        tag_name,
+        error_name,
+        sqrt,
+        sin,
+        cos,
+        tan,
+        exp,
+        exp2,
+        log,
+        log2,
+        log10,
+        floor,
+        ceil,
+        round,
+        trunc_float,
+        neg,
+        neg_optimized,
+        cmp_lt_errors_len,
+        set_err_return_trace,
+        c_va_end,
+
+        pub fn from(tag: Air.Inst.Tag) @This() {
+            return switch (tag) {
+                .is_null => .is_null,
+                .is_non_null => .is_non_null,
+                .is_null_ptr => .is_null_ptr,
+                .is_non_null_ptr => .is_non_null_ptr,
+                .is_err => .is_err,
+                .is_non_err => .is_non_err,
+                .is_err_ptr => .is_err_ptr,
+                .is_non_err_ptr => .is_non_err_ptr,
+                .ret => .ret,
+                .ret_safe => .ret_safe,
+                .ret_load => .ret_load,
+                .is_named_enum_value => .is_named_enum_value,
+                .tag_name => .tag_name,
+                .error_name => .error_name,
+                .sqrt => .sqrt,
+                .sin => .sin,
+                .cos => .cos,
+                .tan => .tan,
+                .exp => .exp,
+                .exp2 => .exp2,
+                .log => .log,
+                .log2 => .log2,
+                .log10 => .log10,
+                .floor => .floor,
+                .ceil => .ceil,
+                .round => .round,
+                .trunc_float => .trunc_float,
+                .neg => .neg,
+                .neg_optimized => .neg_optimized,
+                .cmp_lt_errors_len => .cmp_lt_errors_len,
+                .set_err_return_trace => .set_err_return_trace,
+                .c_va_end => .c_va_end,
+                else => .invalid,
+            };
+        }
+    };
+
+    operation: Tag,
     operand: Operand,
 };
 
@@ -214,8 +298,8 @@ pub const AirExpansion = struct {
 
     ip: *const InternPool,
 
-    current_instruction_index: @typeInfo(Air.Inst.Index).@"enum".tag_type,
-    current: AirKey,
+    current_instruction_index: Instruction.Index,
+    current: Instruction,
 
     pub fn init(air: *const Air, ip: *const InternPool, initial_instruction_index: Air.Inst.Index) @This() {
         return .{
@@ -224,22 +308,28 @@ pub const AirExpansion = struct {
             .air_data = air.instructions.items(.data),
             .ip = ip,
             .current_instruction_index = @intFromEnum(initial_instruction_index),
-            .current = .start,
+            .current = .{
+                .index = @intFromEnum(initial_instruction_index),
+                .key = .start,
+            },
         };
     }
 
-    pub fn get(self: *@This()) AirKey {
+    pub fn get(self: *@This()) Instruction {
         return self.current;
     }
 
-    pub fn nextInstruction(self: *@This()) AirKey {
-        if (self.current_instruction_index >= self.air_tags.len) return .end_of_instructions;
+    pub fn nextInstruction(self: *@This()) Instruction {
+        if (self.current_instruction_index >= self.air_tags.len) return .{
+            .index = self.current_instruction_index,
+            .key = .end_of_instructions,
+        };
         defer self.current_instruction_index += 1;
 
         const tag = self.air_tags[self.current_instruction_index];
         const data = self.air_data[self.current_instruction_index];
 
-        self.current = switch (tag) {
+        const key: AirKey = switch (tag) {
             // Binary operations.
             .add,
             .add_optimized,
@@ -342,7 +432,12 @@ pub const AirExpansion = struct {
             .cmp_lt_errors_len,
             .set_err_return_trace,
             .c_va_end,
-            => .{ .unary_operation = .{ .operand = derefOperand(self, data.un_op) } },
+            => .{
+                .unary_operation = .{
+                    .operation = .from(tag),
+                    .operand = derefOperand(self, data.un_op),
+                },
+            },
 
             // No operations.
             .trap,
@@ -477,236 +572,27 @@ pub const AirExpansion = struct {
             .work_group_id,
             => .unsupported, // TODO(pwr): NYI.
         };
-
+        self.current = .{ .index = self.current_instruction_index, .key = key };
         return self.get();
     }
 
     fn derefOperand(self: *const @This(), operand_ref: Air.Inst.Ref) Operand {
-        // TODO(pwr): verify that checking the static types explicitely is not required.
-        // Static type reserved in first AIR indexes.
-        // if (@intFromEnum(operand_ref) < InternPool.static_len) return .{ .typ = .{ .static_type = .from(operand_ref) } };
-        // Or interned type.
         if (operand_ref.toInterned()) |ip_index| return .{ .interned = self.ip.indexToKey(ip_index) };
-        // Or instruction reference.
         return .{ .instruction_ref = operand_ref.toIndex().? };
     }
 
     fn derefType(self: *const @This(), type_ref: compiler.Type) Type {
-        // TODO(pwr): verify that checking the static types explicitely is not required.
         const ip_index = type_ref.toIntern();
-        return .{ .interned = self.ip.indexToKey(ip_index) };
+        return self.ip.indexToKey(ip_index);
     }
 };
 
-// TODO(pwr): create an own decoupled type definition, so compiler internal types can change.
+// TODO(pwr): create own decoupled type definitions for Key and Type, so compiler internal types can change.
 // At a later point in time: direct InternPool indexToKey usage works very well for now.
 pub const Key = InternPool.Key;
-
-pub const Type = union(enum) {
-    pub const StaticType = enum {
-        invalid,
-        u0_type,
-        i0_type,
-        u1_type,
-        u8_type,
-        i8_type,
-        u16_type,
-        i16_type,
-        u29_type,
-        u32_type,
-        i32_type,
-        u64_type,
-        i64_type,
-        u80_type,
-        u128_type,
-        i128_type,
-        usize_type,
-        isize_type,
-        c_char_type,
-        c_short_type,
-        c_ushort_type,
-        c_int_type,
-        c_uint_type,
-        c_long_type,
-        c_ulong_type,
-        c_longlong_type,
-        c_ulonglong_type,
-        c_longdouble_type,
-        f16_type,
-        f32_type,
-        f64_type,
-        f80_type,
-        f128_type,
-        anyopaque_type,
-        bool_type,
-        void_type,
-        type_type,
-        anyerror_type,
-        comptime_int_type,
-        comptime_float_type,
-        noreturn_type,
-        anyframe_type,
-        null_type,
-        undefined_type,
-        enum_literal_type,
-        manyptr_u8_type,
-        manyptr_const_u8_type,
-        manyptr_const_u8_sentinel_0_type,
-        single_const_pointer_to_comptime_int_type,
-        slice_const_u8_type,
-        slice_const_u8_sentinel_0_type,
-        vector_16_i8_type,
-        vector_32_i8_type,
-        vector_16_u8_type,
-        vector_32_u8_type,
-        vector_8_i16_type,
-        vector_16_i16_type,
-        vector_8_u16_type,
-        vector_16_u16_type,
-        vector_4_i32_type,
-        vector_8_i32_type,
-        vector_4_u32_type,
-        vector_8_u32_type,
-        vector_2_i64_type,
-        vector_4_i64_type,
-        vector_2_u64_type,
-        vector_4_u64_type,
-        vector_4_f16_type,
-        vector_8_f16_type,
-        vector_2_f32_type,
-        vector_4_f32_type,
-        vector_8_f32_type,
-        vector_2_f64_type,
-        vector_4_f64_type,
-        optional_noreturn_type,
-        anyerror_void_error_union_type,
-        adhoc_inferred_error_set_type,
-        generic_poison_type,
-        empty_tuple_type,
-        undef,
-        zero,
-        zero_usize,
-        zero_u8,
-        one,
-        one_usize,
-        one_u8,
-        four_u8,
-        negative_one,
-        void_value,
-        unreachable_value,
-        null_value,
-        bool_true,
-        bool_false,
-        empty_tuple,
-        none,
-
-        pub fn from(tag: Air.Inst.Ref) @This() {
-            return switch (tag) {
-                .u0_type => .u0_type,
-                .i0_type => .i0_type,
-                .u1_type => .u1_type,
-                .u8_type => .u8_type,
-                .i8_type => .i8_type,
-                .u16_type => .u16_type,
-                .i16_type => .i16_type,
-                .u29_type => .u29_type,
-                .u32_type => .u32_type,
-                .i32_type => .i32_type,
-                .u64_type => .u64_type,
-                .i64_type => .i64_type,
-                .u80_type => .u80_type,
-                .u128_type => .u128_type,
-                .i128_type => .i128_type,
-                .usize_type => .usize_type,
-                .isize_type => .isize_type,
-                .c_char_type => .c_char_type,
-                .c_short_type => .c_short_type,
-                .c_ushort_type => .c_ushort_type,
-                .c_int_type => .c_int_type,
-                .c_uint_type => .c_uint_type,
-                .c_long_type => .c_long_type,
-                .c_ulong_type => .c_ulong_type,
-                .c_longlong_type => .c_longlong_type,
-                .c_ulonglong_type => .c_ulonglong_type,
-                .c_longdouble_type => .c_longdouble_type,
-                .f16_type => .f16_type,
-                .f32_type => .f32_type,
-                .f64_type => .f64_type,
-                .f80_type => .f80_type,
-                .f128_type => .f128_type,
-                .anyopaque_type => .anyopaque_type,
-                .bool_type => .bool_type,
-                .void_type => .void_type,
-                .type_type => .type_type,
-                .anyerror_type => .anyerror_type,
-                .comptime_int_type => .comptime_int_type,
-                .comptime_float_type => .comptime_float_type,
-                .noreturn_type => .noreturn_type,
-                .anyframe_type => .anyframe_type,
-                .null_type => .null_type,
-                .undefined_type => .undefined_type,
-                .enum_literal_type => .enum_literal_type,
-                .manyptr_u8_type => .manyptr_u8_type,
-                .manyptr_const_u8_type => .manyptr_const_u8_type,
-                .manyptr_const_u8_sentinel_0_type => .manyptr_const_u8_sentinel_0_type,
-                .single_const_pointer_to_comptime_int_type => .single_const_pointer_to_comptime_int_type,
-                .slice_const_u8_type => .slice_const_u8_type,
-                .slice_const_u8_sentinel_0_type => .slice_const_u8_sentinel_0_type,
-                .vector_16_i8_type => .vector_16_i8_type,
-                .vector_32_i8_type => .vector_32_i8_type,
-                .vector_16_u8_type => .vector_16_u8_type,
-                .vector_32_u8_type => .vector_32_u8_type,
-                .vector_8_i16_type => .vector_8_i16_type,
-                .vector_16_i16_type => .vector_16_i16_type,
-                .vector_8_u16_type => .vector_8_u16_type,
-                .vector_16_u16_type => .vector_16_u16_type,
-                .vector_4_i32_type => .vector_4_i32_type,
-                .vector_8_i32_type => .vector_8_i32_type,
-                .vector_4_u32_type => .vector_4_u32_type,
-                .vector_8_u32_type => .vector_8_u32_type,
-                .vector_2_i64_type => .vector_2_i64_type,
-                .vector_4_i64_type => .vector_4_i64_type,
-                .vector_2_u64_type => .vector_2_u64_type,
-                .vector_4_u64_type => .vector_4_u64_type,
-                .vector_4_f16_type => .vector_4_f16_type,
-                .vector_8_f16_type => .vector_8_f16_type,
-                .vector_2_f32_type => .vector_2_f32_type,
-                .vector_4_f32_type => .vector_4_f32_type,
-                .vector_8_f32_type => .vector_8_f32_type,
-                .vector_2_f64_type => .vector_2_f64_type,
-                .vector_4_f64_type => .vector_4_f64_type,
-                .optional_noreturn_type => .optional_noreturn_type,
-                .anyerror_void_error_union_type => .anyerror_void_error_union_type,
-                .adhoc_inferred_error_set_type => .adhoc_inferred_error_set_type,
-                .generic_poison_type => .generic_poison_type,
-                .empty_tuple_type => .empty_tuple_type,
-                .undef => .undef,
-                .zero => .zero,
-                .zero_usize => .zero_usize,
-                .zero_u8 => .zero_u8,
-                .one => .one,
-                .one_usize => .one_usize,
-                .one_u8 => .one_u8,
-                .four_u8 => .four_u8,
-                .negative_one => .negative_one,
-                .void_value => .void_value,
-                .unreachable_value => .unreachable_value,
-                .null_value => .null_value,
-                .bool_true => .bool_true,
-                .bool_false => .bool_false,
-                .empty_tuple => .empty_tuple,
-                .none => .none,
-                else => .invalid,
-            };
-        }
-    };
-
-    // static_type: StaticType,
-    interned: Key,
-};
+pub const Type = InternPool.Key;
 
 pub const Operand = union(enum) {
-    typ: Type,
     interned: Key,
     instruction_ref: Air.Inst.Index,
 };
