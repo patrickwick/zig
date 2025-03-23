@@ -64,8 +64,21 @@ pub fn main() !void {
         try out.print("\n\n", .{});
     }
 
+    const main_body = air_import.air.getMainBody();
+
     // TODO(pwr): some of the internal functions are skipped due to missing exported data.
     air_lib.print_air.dump(air_import.zcu_main_thread, air_import.air, air_import.liveness);
+
+    std.log.info("Iteration:", .{});
+    var iterator = air_lib.AirExpansion.init(&air_import.air, intern_pool, main_body[0]);
+    var instruction: air_lib.AirKey = .start;
+    while (instruction != .end_of_instructions) : (instruction = iterator.nextInstruction()) {
+        std.log.info("{s}", .{@tagName(instruction)});
+
+        switch (instruction) {
+            else => {},
+        }
+    }
 
     // Sybolic execution prototype.
     {
