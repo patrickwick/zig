@@ -1,16 +1,19 @@
+// Simple PoC to demonstrate:
+// * Importing the binary AIR representation emittted while compiling a program.
+// * Using imported AIR to create the same debug output as --verbose-air provides within the compiler.
+// * Detect division by zero as a simple PoC using symbolic execution.
+// * TODO(pwr): maybe:
+//   * Stable iterator over expanded AIR instructions to tagged unions -> type safe + stable over Zig versions.
+//   * Integrate CLR to perform additional checks -> would be nice to know how fast it is.
+//   * Allow -fincremental usage with analysis -> would be amazing for clangd style fast interaction on save.
+//     * Experimental web interface for simple division by zero analysis.
+
 const std = @import("std");
 
 const air_lib = @import("air");
 const Air = air_lib.Air;
 
-/// Simple PoC to demonstrate:
-/// * importing the binary AIR representation emittted while compiling a program.
-/// * using imported AIR to create the same debug output as --verbose-air provides within the compiler.
-/// * detect division by zero as a simple PoC using symbolic execution.
-/// * TODO(pwr): maybe integrate CLR to perform additional checks -> would be nice to know how fast it is.
 pub fn main() !void {
-    air_lib.InternPool.ANALYZER = true; // FIXME(pwr): remove. Temporarirly disabled functions that are not yet supported.
-
     const stdout = std.io.getStdOut();
     const out = stdout.writer();
 
@@ -40,22 +43,14 @@ pub fn main() !void {
 
     // Iterate functions until the end of the stream is reached or the target function is found.
     const target_function = "test.main";
-    const air_optional = while (true) {
-        // TODO: create a function to search a file -> peek the function names only without reading all functions.
-        // TODO: return optional to indicate end of stream without an error.
-        const air_function = air_lib.importAir(arena_allocator, air_file.reader().any()) catch |err| switch (err) {
-            error.EndOfStream => break null,
-            else => return err,
-        };
-
-        if (std.mem.eql(u8, air_function.function_name, target_function)) break air_function;
-    };
-
-    const air_import: air_lib.AirImported = air_optional orelse {
+    const air_import = try air_lib.importAirFunction(target_function, arena_allocator, air_file.reader().any()) orelse {
         std.log.err("target function \"{s}\" not found in AIR file \"{s}\"", .{ target_function, air_file_path });
         return error.TargetFunctionNotFound;
     };
 
+    // TODO(pwr): temporarily importing the full intern pool and overwriting the function local one.
+    // This is required to have data about all compiled modules, not just the analyzed function.
+    // => Not sure what the best approach is here yet.
     const intern_pool_import = try air_lib.importInternPool(arena_allocator, ip_file.reader().any());
     const intern_pool = &intern_pool_import.intern_pool;
     air_import.zcu_main_thread.zcu.intern_pool = intern_pool.*;

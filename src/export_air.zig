@@ -299,6 +299,7 @@ pub const AirImported = struct {
     pub const InternPoolImported = struct {
         intern_pool: InternPool,
         local_shared_data: []align(8) u8, // FIXME(pwr): explicit shared list alignment stored in the buffer.
+        allocator: std.mem.Allocator,
 
         pub fn deinit(self: *@This()) void {
             self.allocator.free(self.local_shared_data);
@@ -542,6 +543,7 @@ pub fn importInternPool(allocator: std.mem.Allocator, reader: std.io.AnyReader) 
     return .{
         .intern_pool = ip,
         .local_shared_data = local_shared_data.?,
+        .allocator = allocator,
     };
 }
 
