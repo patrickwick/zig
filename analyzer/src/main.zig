@@ -10,8 +10,8 @@
 
 const std = @import("std");
 
-const air_lib = @import("air");
-const Air = air_lib.Air;
+const air = @import("air");
+const Air = air.Air;
 
 pub fn main() !void {
     const stdout = std.io.getStdOut();
@@ -33,17 +33,17 @@ pub fn main() !void {
     defer arena.deinit();
     const arena_allocator = arena.allocator();
 
-    const air_file_path = "../" ++ air_lib.DEFAULT_BINARY_AIR_PATH;
+    const air_file_path = "../" ++ air.DEFAULT_BINARY_AIR_PATH;
     const air_file = try std.fs.cwd().openFile(air_file_path, .{});
     defer air_file.close();
 
-    const ip_file_path = "../" ++ air_lib.DEFAULT_BINARY_INTERN_POOL_PATH;
+    const ip_file_path = "../" ++ air.DEFAULT_BINARY_INTERN_POOL_PATH;
     const ip_file = try std.fs.cwd().openFile(ip_file_path, .{});
     defer ip_file.close();
 
     // Iterate functions until the end of the stream is reached or the target function is found.
     const target_function = "test.main";
-    const air_import = try air_lib.importAirFunction(target_function, arena_allocator, air_file.reader().any()) orelse {
+    const air_import = try air.importAirFunction(target_function, arena_allocator, air_file.reader().any()) orelse {
         std.log.err("target function \"{s}\" not found in AIR file \"{s}\"", .{ target_function, air_file_path });
         return error.TargetFunctionNotFound;
     };
@@ -51,22 +51,35 @@ pub fn main() !void {
     // TODO(pwr): temporarily importing the full intern pool and overwriting the function local one.
     // This is required to have data about all compiled modules, not just the analyzed function.
     // => Not sure what the best approach is here yet.
-    const intern_pool_import = try air_lib.importInternPool(arena_allocator, ip_file.reader().any());
+    const intern_pool_import = try air.importInternPool(arena_allocator, ip_file.reader().any());
     const intern_pool = &intern_pool_import.intern_pool;
     air_import.zcu_main_thread.zcu.intern_pool = intern_pool.*;
 
     // TODO(pwr): some of the internal functions are skipped due to missing exported data.
-    air_lib.print_air.dump(air_import.zcu_main_thread, air_import.air, air_import.liveness);
+    air.print_air.dump(air_import.zcu_main_thread, air_import.air, air_import.liveness);
 
     const main_body = air_import.air.getMainBody();
     try out.print("Main body instructions:\n{any}\n", .{main_body});
 
-    var iterator = air_lib.AirExpansion.init(&air_import.air, intern_pool, main_body[0]);
-    var instruction = iterator.get();
+    var indentation: usize = 0;
+    var iterator = air.AirExpansion.init(&air_import.air, intern_pool, main_body[0]);
+    var instruction = iterator.nextInstruction();
     while (true) : (instruction = iterator.nextInstruction()) {
-        try out.print("{any}\n", .{instruction});
+        try out.print("%{d} {s}:{any}\n", .{ instruction.index, @tagName(instruction.tag), instruction.key });
+
+        indentation += 2;
+        defer indentation -= 2;
 
         switch (instruction.key) {
+            .binary_operation => |op| {
+                switch (op.operation) {
+                    .store, .store_safe => {
+                        try out.writeByteNTimes(' ', indentation); // TODO(pwr): add indentation state.
+                        try out.print("{any} = {any}", .{ op.left, op.right });
+                    },
+                    else => {},
+                }
+            },
             .end_of_instructions => break,
             else => {},
         }

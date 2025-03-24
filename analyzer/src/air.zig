@@ -42,8 +42,11 @@ pub const Instruction = struct {
     pub const Index = @typeInfo(Air.Inst.Index).@"enum".tag_type;
 
     index: Index,
+    tag: AirTag,
     key: AirKey,
 };
+
+pub const AirTag = Air.Inst.Tag;
 
 pub const AirKey = union(enum) {
     /// Initial key.
@@ -316,24 +319,19 @@ pub const AirExpansion = struct {
             .current_instruction_index = @intFromEnum(initial_instruction_index),
             .current = .{
                 .index = @intFromEnum(initial_instruction_index),
+                .tag = Air.Inst.Tag.dbg_empty_stmt,
                 .key = .start,
             },
         };
     }
 
-    pub fn get(self: *@This()) Instruction {
+    pub fn getCurrent(self: *@This()) Instruction {
         return self.current;
     }
 
-    pub fn nextInstruction(self: *@This()) Instruction {
-        if (self.current_instruction_index >= self.air_tags.len) return .{
-            .index = self.current_instruction_index,
-            .key = .end_of_instructions,
-        };
-        defer self.current_instruction_index += 1;
-
-        const tag = self.air_tags[self.current_instruction_index];
-        const data = self.air_data[self.current_instruction_index];
+    pub fn getInstruction(self: *@This(), index: Instruction.Index) Instruction {
+        const tag = self.air_tags[index];
+        const data = self.air_data[index];
 
         const key: AirKey = switch (tag) {
             // Binary operations.
@@ -590,13 +588,24 @@ pub const AirExpansion = struct {
             .work_group_id,
             => .unsupported, // TODO(pwr): NYI.
         };
-        self.current = .{ .index = self.current_instruction_index, .key = key };
-        return self.get();
+
+        return .{ .index = index, .tag = tag, .key = key };
+    }
+
+    pub fn nextInstruction(self: *@This()) Instruction {
+        if (self.current_instruction_index >= self.air_tags.len) return .{
+            .index = self.current_instruction_index,
+            .tag = Air.Inst.Tag.dbg_empty_stmt,
+            .key = .end_of_instructions,
+        };
+        defer self.current_instruction_index += 1;
+
+        return self.getInstruction(self.current_instruction_index);
     }
 
     fn derefOperand(self: *const @This(), operand_ref: Air.Inst.Ref) Operand {
         if (operand_ref.toInterned()) |ip_index| return .{ .interned = self.ip.indexToKey(ip_index) };
-        return .{ .instruction_ref = operand_ref.toIndex().? };
+        return .{ .instruction_ref = @intFromEnum(operand_ref.toIndex().?) };
     }
 
     fn derefType(self: *const @This(), type_ref: compiler.Type) Type {
@@ -612,7 +621,7 @@ pub const Type = InternPool.Key;
 
 pub const Operand = union(enum) {
     interned: Key,
-    instruction_ref: Air.Inst.Index,
+    instruction_ref: Instruction.Index,
 };
 
 const t = std.testing;
