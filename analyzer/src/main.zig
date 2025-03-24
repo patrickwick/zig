@@ -87,6 +87,6 @@ pub fn main() !void {
 
     // Sybolic execution prototype.
     {
-        // TODO(pwr): NYI.
+        // TODO(pwr): NYI: recursively descend the tree.
     }
 }

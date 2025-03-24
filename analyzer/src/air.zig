@@ -57,8 +57,30 @@ pub const AirKey = union(enum) {
 
     binary_operation: BinaryOperation,
     unary_operation: UnaryOperation,
-    no_operation: NoOperation,
+    type_and_operand: TypeAndOperand,
+    type_and_binary_operation: TypeAndBinaryOperation,
+
+    trap: NoOperation,
+    breakpoint: NoOperation,
+    dbg_empty_stmt: NoOperation,
+    unreach: NoOperation,
+    ret_addr: NoOperation,
+    frame_addr: NoOperation,
+    save_err_return_trace_index: NoOperation,
+
     allocation: Allocation,
+    return_pointer: ReturnPointer,
+    error_return_trace: ErrorReturnTrace,
+    c_variadic_argument_start: CVardiadicArgumentStart,
+
+    argument: Argument,
+
+    struct_field_ptr: StructField,
+    struct_field_val: StructField,
+    inferred_alloc: StructField,
+    inferred_alloc_comptime: StructField,
+    assembly: StructField,
+
     debug_statement: DebugStatement,
     debug_variable: DebugVariable,
 };
@@ -282,7 +304,27 @@ pub const UnaryOperation = struct {
     operand: Operand,
 };
 
+pub const TypeAndOperand = struct {
+    typ: Type,
+    operand: Operand,
+};
+
+pub const TypeAndBinaryOperation = struct {
+    typ: Type,
+    operation: BinaryOperation,
+};
+
 pub const NoOperation = void;
+
+pub const Argument = struct {
+    typ: Type,
+    name: [:0]const u8,
+};
+
+pub const StructField = struct {
+    typ: Type,
+    operand: Operand,
+};
 
 pub const DebugStatement = struct {
     line: u32,
@@ -291,12 +333,28 @@ pub const DebugStatement = struct {
 
 pub const DebugVariable = struct {
     operand: Operand,
-    name: []const u8,
+    name: [:0]const u8,
 };
 
 pub const Allocation = struct {
-    allocated_type: Type,
+    typ: Type,
 };
+
+pub const ReturnPointer = struct {
+    typ: Type,
+};
+
+pub const ErrorReturnTrace = struct {
+    typ: Type,
+};
+
+pub const CVardiadicArgumentStart = struct {
+    typ: Type,
+};
+
+return_pointer: ReturnPointer,
+error_return_trace: ErrorReturnTrace,
+c_variadic_argument_start: CVardiadicArgumentStart,
 
 /// Expand AIR incrementally based on the raw AIR and InternPool data like a tokenizer would.
 /// This simplifies safe AIR usage over using the raw split tag and data arrays at a small runtime cost.
@@ -443,24 +501,32 @@ pub const AirExpansion = struct {
                 },
             },
 
-            // No operations.
-            .trap,
-            .breakpoint,
-            .dbg_empty_stmt,
-            .unreach,
-            .ret_addr,
-            .frame_addr,
-            .save_err_return_trace_index,
-            => AirKey.no_operation,
+            // No operation.
+            .trap => .trap,
+            .breakpoint => .breakpoint,
+            .dbg_empty_stmt => .dbg_empty_stmt,
+            .unreach => .unreach,
+            .ret_addr => .ret_addr,
+            .frame_addr => .frame_addr,
+            .save_err_return_trace_index => .save_err_return_trace_index,
 
-            .alloc => .{ .allocation = .{ .allocated_type = derefType(self, data.ty) } },
-            .ret_ptr,
-            .err_return_trace,
-            .c_va_start,
-            => .unsupported, // TODO(pwr): NYI.
+            // Type.
+            .alloc => .{ .allocation = .{ .typ = derefType(self, data.ty) } },
+            .ret_ptr => .{ .return_pointer = .{ .typ = derefType(self, data.ty) } },
+            .err_return_trace => .{ .error_return_trace = .{ .typ = derefType(self, data.ty) } },
+            .c_va_start => .{ .c_variadic_argument_start = .{ .typ = derefType(self, data.ty) } },
 
-            .arg,
-            => .unsupported, // TODO(pwr): NYI.
+            .arg => key: {
+                const typ = derefType(self, data.arg.ty.toType());
+                const name = data.arg.name.toSlice(self.air.*);
+
+                break :key .{
+                    .argument = .{
+                        .typ = typ,
+                        .name = name,
+                    },
+                };
+            },
 
             .not,
             .bitcast,
@@ -505,7 +571,17 @@ pub const AirExpansion = struct {
             .addrspace_cast,
             .c_va_arg,
             .c_va_copy,
-            => .unsupported, // TODO(pwr): NYI.
+            => key: {
+                const typ = derefType(self, data.ty_op.ty.toType());
+                const operand = derefOperand(self, data.ty_op.operand);
+
+                break :key .{
+                    .type_and_operand = .{
+                        .typ = typ,
+                        .operand = operand,
+                    },
+                };
+            },
 
             .block,
             .dbg_inline_block,
@@ -523,13 +599,42 @@ pub const AirExpansion = struct {
             .sub_with_overflow,
             .mul_with_overflow,
             .shl_with_overflow,
-            => .unsupported, // TODO(pwr): NYI.
+            => key: {
+                const typ = derefType(self, data.ty_pl.ty.toType());
+                const extra = self.air.extraData(Air.Bin, data.ty_pl.payload).data;
+                const left = derefOperand(self, extra.lhs);
+                const right = derefOperand(self, extra.rhs);
+
+                break :key .{
+                    .type_and_binary_operation = .{
+                        .typ = typ,
+                        .operation = .{
+                            .operation = .from(tag),
+                            .left = left,
+                            .right = right,
+                        },
+                    },
+                };
+            },
 
             .call,
             .call_always_tail,
             .call_never_tail,
             .call_never_inline,
             => .unsupported, // TODO(pwr): NYI.
+            // => key: {
+            //     const extra = self.air.extraData(Air.Call, data.pl_op.payload).data;
+            //     // TODO(pwr): convert to operands -> requires arena.
+            //     const args = @as([]const Air.Inst.Ref, @ptrCast(w.air.extra[extra.end..][0..extra.data.args_len]));
+
+            //     break :key .{
+            //         .call = .{
+            //             .operand = operand,
+            //             .arguments = args,
+            //             .calling_convetion = ,
+            //         },
+            //     };
+            // },
 
             .dbg_var_ptr,
             .dbg_var_val,
@@ -550,11 +655,52 @@ pub const AirExpansion = struct {
 
             .dbg_stmt => .{ .debug_statement = .{ .line = data.dbg_stmt.line + 1, .column = data.dbg_stmt.column + 1 } },
 
-            .struct_field_ptr => .unsupported, // TODO(pwr): NYI.
-            .struct_field_val => .unsupported, // TODO(pwr): NYI.
-            .inferred_alloc => .unsupported, // TODO(pwr): NYI.
-            .inferred_alloc_comptime => .unsupported, // TODO(pwr): NYI.
-            .assembly => .unsupported, // TODO(pwr): NYI.
+            // TODO(pwr): extract function for copy pastes.
+            .struct_field_ptr => key: {
+                const extra = self.air.extraData(Air.StructField, data.ty_pl.payload).data;
+                break :key .{
+                    .struct_field_ptr = .{
+                        .typ = derefType(self, data.ty_pl.ty.toType()),
+                        .operand = derefOperand(self, extra.struct_operand),
+                    },
+                };
+            },
+            .struct_field_val => key: {
+                const extra = self.air.extraData(Air.StructField, data.ty_pl.payload).data;
+                break :key .{
+                    .struct_field_val = .{
+                        .typ = derefType(self, data.ty_pl.ty.toType()),
+                        .operand = derefOperand(self, extra.struct_operand),
+                    },
+                };
+            },
+            .inferred_alloc => key: {
+                const extra = self.air.extraData(Air.StructField, data.ty_pl.payload).data;
+                break :key .{
+                    .inferred_alloc = .{
+                        .typ = derefType(self, data.ty_pl.ty.toType()),
+                        .operand = derefOperand(self, extra.struct_operand),
+                    },
+                };
+            },
+            .inferred_alloc_comptime => key: {
+                const extra = self.air.extraData(Air.StructField, data.ty_pl.payload).data;
+                break :key .{
+                    .inferred_alloc_comptime = .{
+                        .typ = derefType(self, data.ty_pl.ty.toType()),
+                        .operand = derefOperand(self, extra.struct_operand),
+                    },
+                };
+            },
+            .assembly => key: {
+                const extra = self.air.extraData(Air.StructField, data.ty_pl.payload).data;
+                break :key .{
+                    .assembly = .{
+                        .typ = derefType(self, data.ty_pl.ty.toType()),
+                        .operand = derefOperand(self, extra.struct_operand),
+                    },
+                };
+            },
 
             .aggregate_init => .unsupported, // TODO(pwr): NYI.
             .union_init => .unsupported, // TODO(pwr): NYI.
