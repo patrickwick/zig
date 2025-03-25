@@ -53,14 +53,18 @@ pub const AirKey = union(enum) {
     start: void,
     /// Key indicating that no more instructions are left.
     end_of_instructions: void,
-    unsupported: void, // TODO(pwr): not yet implemented instructions.
+    unsupported: void,
 
     binary_operation: BinaryOperation,
     unary_operation: UnaryOperation,
     type_and_operand: TypeAndOperand,
     type_and_binary_operation: TypeAndBinaryOperation,
+    call: Call,
+
     block: Block,
+    loop: Loop,
     debug_inline_block: DebugInlineBlock,
+    block_return: BlockReturn,
 
     trap: NoOperation,
     breakpoint: NoOperation,
@@ -77,11 +81,15 @@ pub const AirKey = union(enum) {
 
     argument: Argument,
 
+    conditional_branch: ConditionalBranch,
+
     struct_field_ptr: StructField,
     struct_field_val: StructField,
     inferred_alloc: StructField,
     inferred_alloc_comptime: StructField,
     assembly: StructField,
+
+    aggregate: Aggregate,
 
     debug_statement: DebugStatement,
     debug_variable: DebugVariable,
@@ -316,7 +324,18 @@ pub const TypeAndBinaryOperation = struct {
     operation: BinaryOperation,
 };
 
+pub const Call = struct {
+    operand: Operand,
+    argument_indexes: []const Instruction.Index,
+    call_modifier: std.builtin.CallModifier,
+};
+
 pub const Block = struct {
+    typ: Type,
+    instruction_indexes: []const Instruction.Index,
+};
+
+pub const Loop = struct {
     typ: Type,
     instruction_indexes: []const Instruction.Index,
 };
@@ -327,6 +346,11 @@ pub const DebugInlineBlock = struct {
     function: Operand,
 };
 
+pub const BlockReturn = struct {
+    operand: Operand,
+    block_instruction_index: Instruction.Index,
+};
+
 pub const NoOperation = void;
 
 pub const Argument = struct {
@@ -334,9 +358,20 @@ pub const Argument = struct {
     name: [:0]const u8,
 };
 
+pub const ConditionalBranch = struct {
+    operand: Operand,
+    then_indexes: []const Instruction.Index,
+    else_indexes: []const Instruction.Index,
+};
+
 pub const StructField = struct {
     typ: Type,
     operand: Operand,
+};
+
+pub const Aggregate = struct {
+    typ: Type,
+    element_references: []const Air.Inst.Ref,
 };
 
 pub const DebugStatement = struct {
@@ -405,6 +440,7 @@ pub const AirExpansion = struct {
         const tag = self.air_tags[index];
         const data = self.air_data[index];
 
+        // TODO(pwr): reorder according to Air.Tag.
         const key: AirKey = switch (tag) {
             // Binary operations.
             .add,
@@ -610,6 +646,28 @@ pub const AirExpansion = struct {
                 };
             },
 
+            .loop => key: {
+                const typ = derefType(self, data.ty_pl.ty.toType());
+                const extra = self.air.extraData(Air.Block, data.ty_pl.payload);
+                const instruction_indexes: []const Instruction.Index = self.air.extra[extra.end..][0..extra.data.body_len];
+
+                break :key .{
+                    .loop = .{
+                        .typ = typ,
+                        .instruction_indexes = instruction_indexes,
+                    },
+                };
+            },
+
+            .br => .{
+                .block_return = .{
+                    .operand = derefOperand(self, data.br.operand),
+                    .block_instruction_index = @intFromEnum(data.br.block_inst),
+                },
+            },
+
+            .repeat => .unsupported, // TODO(pwr): NYI.
+
             .dbg_inline_block => key: {
                 const typ = derefType(self, data.ty_pl.ty.toType());
                 const extra = self.air.extraData(Air.DbgInlineBlock, data.ty_pl.payload);
@@ -624,9 +682,6 @@ pub const AirExpansion = struct {
                     },
                 };
             },
-
-            .loop,
-            => .unsupported, // TODO(pwr): NYI.
 
             .slice,
             .slice_elem_ptr,
@@ -659,20 +714,27 @@ pub const AirExpansion = struct {
             .call_always_tail,
             .call_never_tail,
             .call_never_inline,
-            => .unsupported, // TODO(pwr): NYI.
-            // => key: {
-            //     const extra = self.air.extraData(Air.Call, data.pl_op.payload).data;
-            //     // TODO(pwr): convert to operands -> requires arena.
-            //     const args = @as([]const Air.Inst.Ref, @ptrCast(w.air.extra[extra.end..][0..extra.data.args_len]));
+            => key: {
+                const operand = derefOperand(self, data.pl_op.operand);
+                const extra = self.air.extraData(Air.Call, data.pl_op.payload);
+                const args: []const Instruction.Index = self.air.extra[extra.end..][0..extra.data.args_len];
 
-            //     break :key .{
-            //         .call = .{
-            //             .operand = operand,
-            //             .arguments = args,
-            //             .calling_convetion = ,
-            //         },
-            //     };
-            // },
+                const call_modifier: std.builtin.CallModifier = switch (tag) {
+                    .call => .auto,
+                    .call_always_tail => .always_tail,
+                    .call_never_tail => .never_tail,
+                    .call_never_inline => .never_inline,
+                    else => unreachable,
+                };
+
+                break :key .{
+                    .call = .{
+                        .operand = operand,
+                        .argument_indexes = args,
+                        .call_modifier = call_modifier,
+                    },
+                };
+            },
 
             .dbg_var_ptr,
             .dbg_var_val,
@@ -740,15 +802,56 @@ pub const AirExpansion = struct {
                 };
             },
 
-            .aggregate_init => .unsupported, // TODO(pwr): NYI.
+            // .aggregate_init => .unsupported,
+            .aggregate_init => key: {
+                const typ = derefType(self, data.ty_pl.ty.toType());
+                // const len = @as(usize, @intCast(vector_ty.arrayLen(zcu)));
+                const element_count = switch (typ) {
+                    .vector_type => |v| v.len,
+                    .array_type => |v| v.len,
+                    .struct_type => @panic("struct type aggregate initialization not yet supported"), // TODO(pwr): NYI
+                    .tuple_type => |v| v.types.len,
+                    else => @panic("invalid aggregate initialization type"),
+                };
+                const element_refs: []const Air.Inst.Ref = @ptrCast(self.air.extra[data.ty_pl.payload..][0..element_count]);
+
+                break :key .{
+                    .aggregate = .{
+                        .typ = typ,
+                        .element_references = element_refs,
+                    },
+                };
+            },
+
             .union_init => .unsupported, // TODO(pwr): NYI.
-            .br => .unsupported, // TODO(pwr): NYI.
+            .field_parent_ptr => .unsupported, // TODO(pwr): NYI.
+
+            .cond_br => key: {
+                const operand = derefOperand(self, data.pl_op.operand);
+                const extra = self.air.extraData(Air.CondBr, data.pl_op.payload);
+                const then_indexes: []const Instruction.Index = self.air.extra[extra.end..][0..extra.data.then_body_len];
+                const else_indexes: []const Instruction.Index = self.air.extra[extra.end + then_indexes.len ..][0..extra.data.else_body_len];
+
+                // TODO(pwr): use extra.data.branch_hints?
+                // TODO(pwr): use liveness.getCondBr?
+
+                break :key .{
+                    .conditional_branch = .{
+                        .operand = operand,
+                        .then_indexes = then_indexes,
+                        .else_indexes = else_indexes,
+                    },
+                };
+            },
+
+            .loop_switch_br, .switch_br => .unsupported, // TODO(pwr): NYI.
             .switch_dispatch => .unsupported, // TODO(pwr): NYI.
-            .repeat => .unsupported, // TODO(pwr): NYI.
-            .cond_br => .unsupported, // TODO(pwr): NYI.
+
+            // Error handling.
             .@"try", .try_cold => .unsupported, // TODO(pwr): NYI.
             .try_ptr, .try_ptr_cold => .unsupported, // TODO(pwr): NYI.
-            .loop_switch_br, .switch_br => .unsupported, // TODO(pwr): NYI.
+
+            // Atomic.
             .cmpxchg_weak, .cmpxchg_strong => .unsupported, // TODO(pwr): NYI.
             .atomic_load => .unsupported, // TODO(pwr): NYI.
             .prefetch => .unsupported, // TODO(pwr): NYI.
@@ -757,20 +860,25 @@ pub const AirExpansion = struct {
             .atomic_store_release => .unsupported, // TODO(pwr): NYI.
             .atomic_store_seq_cst => .unsupported, // TODO(pwr): NYI.
             .atomic_rmw => .unsupported, // TODO(pwr): NYI.
-            .field_parent_ptr => .unsupported, // TODO(pwr): NYI.
-            .wasm_memory_size => .unsupported, // TODO(pwr): NYI.
-            .wasm_memory_grow => .unsupported, // TODO(pwr): NYI.
+
+            // SSE.
+            .vector_store_elem => .unsupported, // TODO(pwr): NYI.
+            .cmp_vector, .cmp_vector_optimized => .unsupported, // TODO(pwr): NYI.
             .mul_add => .unsupported, // TODO(pwr): NYI.
             .select => .unsupported, // TODO(pwr): NYI.
             .shuffle => .unsupported, // TODO(pwr): NYI.
             .reduce, .reduce_optimized => .unsupported, // TODO(pwr): NYI.
-            .cmp_vector, .cmp_vector_optimized => .unsupported, // TODO(pwr): NYI.
-            .vector_store_elem => .unsupported, // TODO(pwr): NYI.
 
+            // WASM.
+            .wasm_memory_size,
+            .wasm_memory_grow,
+            => .unsupported, // NOTE: will not be supported in the near future.
+
+            // OpenCl?
             .work_item_id,
             .work_group_size,
             .work_group_id,
-            => .unsupported, // TODO(pwr): NYI.
+            => .unsupported, // NOTE: will not be supported in the near future.
         };
 
         return .{ .index = index, .tag = tag, .key = key };

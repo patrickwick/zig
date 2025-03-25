@@ -27,7 +27,7 @@ const SymbolicExecution = struct {
         var indentation: usize = 0;
         var instruction = self.expansion.nextInstruction();
         while (true) : (instruction = self.expansion.nextInstruction()) {
-            std.log.info("%{d} {s}:{any}", .{ instruction.index, @tagName(instruction.tag), instruction.key });
+            // std.log.info("%{d} {s}: {any}", .{ instruction.index, @tagName(instruction.tag), instruction.key });
 
             indentation += 2;
             defer indentation -= 2;
@@ -36,7 +36,7 @@ const SymbolicExecution = struct {
                 .binary_operation => |op| {
                     switch (op.operation) {
                         .store, .store_safe => {
-                            std.log.info("{any} = {any}", .{ op.left, op.right });
+                            // std.log.info("{any} = {any}", .{ op.left, op.right });
                         },
                         else => {},
                     }

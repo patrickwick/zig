@@ -65,7 +65,7 @@ pub fn main() !void {
     var iterator = air.AirExpansion.init(&air_import.air, intern_pool, main_body[0]);
     var instruction = iterator.nextInstruction();
     while (true) : (instruction = iterator.nextInstruction()) {
-        try out.print("%{d} {s}:{any}\n", .{ instruction.index, @tagName(instruction.tag), instruction.key });
+        try out.print("%{d} {s}: {any}\n", .{ instruction.index, @tagName(instruction.tag), instruction.key });
 
         indentation += 2;
         defer indentation -= 2;
