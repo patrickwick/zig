@@ -897,7 +897,7 @@ pub const AirExpansion = struct {
 
     fn derefOperand(self: *const @This(), operand_ref: Air.Inst.Ref) Operand {
         if (operand_ref.toInterned()) |ip_index| return .{ .interned = self.ip.indexToKey(ip_index) };
-        return .{ .instruction_ref = @intFromEnum(operand_ref.toIndex().?) };
+        return .{ .instruction_index = @intFromEnum(operand_ref.toIndex().?) };
     }
 
     fn derefType(self: *const @This(), type_ref: compiler.Type) Type {
@@ -913,7 +913,87 @@ pub const Type = InternPool.Key;
 
 pub const Operand = union(enum) {
     interned: Key,
-    instruction_ref: Instruction.Index,
+    instruction_index: Instruction.Index,
+};
+
+pub fn symbolicExecution(air: *const Air, intern_pool: *const InternPool, main_body: []const Air.Inst.Index) void {
+    var execution = SymbolicExecution.init(air, intern_pool, main_body);
+    execution.execute();
+}
+
+const SymbolicExecution = struct {
+    air: *const Air,
+    intern_pool: *const InternPool,
+    body: []const Air.Inst.Index,
+    expansion: AirExpansion,
+
+    fn init(air: *const Air, intern_pool: *const InternPool, body: []const Air.Inst.Index) @This() {
+        std.debug.assert(body.len > 0);
+        return .{
+            .air = air,
+            .intern_pool = intern_pool,
+            .body = body,
+            .expansion = .init(air, intern_pool, body[0]),
+        };
+    }
+
+    fn execute(self: *@This()) void {
+        errdefer @panic("writer failed");
+        const stdout = std.io.getStdOut();
+        const writer = stdout.writer();
+
+        var indentation: usize = 0;
+        var instruction = self.expansion.nextInstruction();
+        while (true) : (instruction = self.expansion.nextInstruction()) {
+            indentation += 2;
+            defer indentation -= 2;
+
+            switch (instruction.key) {
+                .conditional_branch => |cond_br| {
+                    try writer.writeAll("if (");
+
+                    switch (cond_br.operand) {
+                        .instruction_index => |index| {
+                            // TODO: recursion
+                            const inst = self.expansion.getInstruction(index);
+                            try writer.print("  {any}", .{inst});
+                        },
+                        .interned => |key| {
+                            try writer.print("  {any}", .{key});
+                        },
+                    }
+
+                    try writer.writeAll(") {\n");
+
+                    for (cond_br.then_indexes) |then| {
+                        // TODO: recursion
+                        const inst = self.expansion.getInstruction(then);
+                        try writer.print("  {any}\n", .{inst});
+                    }
+
+                    try writer.writeAll("} else {\n");
+
+                    for (cond_br.else_indexes) |then| {
+                        // TODO: recursion
+                        const inst = self.expansion.getInstruction(then);
+                        try writer.print("  {any}\n", .{inst});
+                    }
+
+                    try writer.writeAll("}\n");
+                },
+                .binary_operation => |op| {
+                    switch (op.operation) {
+                        .store, .store_safe => {
+                            // std.log.info("{any} = {any}", .{ op.left, op.right });
+                        },
+                        else => {},
+                    }
+                },
+                .end_of_instructions => break,
+                else => {},
+            }
+        }
+    }
 };
 
 const t = std.testing;
