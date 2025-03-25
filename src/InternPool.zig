@@ -1,6 +1,9 @@
 //! All interned objects have both a value and a type.
 //! This data structure is self-contained.
 
+pub var ANALYZER = false;
+const export_air = @import("export_air.zig");
+
 /// One item per thread, indexed by `tid`, which is dense and unique per thread.
 locals: []Local,
 /// Length must be a power of two and represents the number of simultaneous
@@ -1024,7 +1027,7 @@ pub const DepEntry = extern struct {
     };
 };
 
-const Local = struct {
+pub const Local = struct {
     /// These fields can be accessed from any thread by calling `acquire`.
     /// They are only modified by the owning thread.
     shared: Shared align(std.atomic.cache_line),
@@ -1054,7 +1057,7 @@ const Local = struct {
         namespaces: BucketListMutate,
     } align(std.atomic.cache_line),
 
-    const Shared = struct {
+    pub const Shared = struct {
         items: List(Item),
         extra: Extra,
         limbs: Limbs,
@@ -1097,7 +1100,7 @@ const Local = struct {
         mutex: std.Thread.Mutex,
         len: u32,
 
-        const empty: ListMutate = .{
+        pub const empty: ListMutate = .{
             .mutex = .{},
             .len = 0,
         };
@@ -1110,14 +1113,14 @@ const Local = struct {
 
         const free_list_sentinel = std.math.maxInt(u32);
 
-        const empty: BucketListMutate = .{
+        pub const empty: BucketListMutate = .{
             .last_bucket_len = 0,
             .buckets_list = ListMutate.empty,
             .free_list = free_list_sentinel,
         };
     };
 
-    fn List(comptime Elem: type) type {
+    pub fn List(comptime Elem: type) type {
         assert(@typeInfo(Elem) == .@"struct");
         return struct {
             bytes: [*]align(@alignOf(Elem)) u8,
@@ -1333,7 +1336,7 @@ const Local = struct {
                 }
             };
 
-            const empty: ListSelf = .{ .bytes = @constCast(&(extern struct {
+            pub const empty: ListSelf = .{ .bytes = @constCast(&(extern struct {
                 header: Header,
                 bytes: [0]u8 align(@alignOf(Elem)),
             }{
@@ -1353,7 +1356,7 @@ const Local = struct {
                 @atomicStore([*]align(@alignOf(Elem)) u8, &list.bytes, new_list.bytes, .release);
             }
 
-            const Header = extern struct {
+            pub const Header = extern struct {
                 capacity: u32,
             };
             fn header(list: ListSelf) *Header {
@@ -1361,7 +1364,8 @@ const Local = struct {
             }
             pub fn view(list: ListSelf) View {
                 const capacity = list.header().capacity;
-                assert(capacity > 0); // optimizes `MultiArrayList.Slice.items`
+                // FIXME(pwr): asserts on ip.dump() in analysis code for some reason...
+                // assert(capacity > 0); // optimizes `MultiArrayList.Slice.items`
                 return .{
                     .bytes = list.bytes,
                     .len = capacity,
@@ -1770,6 +1774,7 @@ pub const String = enum(u32) {
     }
 
     fn toOverlongSlice(string: String, ip: *const InternPool) []const u8 {
+        if (ANALYZER) return "TODO(pwr): NYI"; // TODO(pwr): NYI.
         const unwrapped_string = string.unwrap(ip);
         const strings = ip.getLocalShared(unwrapped_string.tid).strings.acquire();
         return strings.view().items(.@"0")[unwrapped_string.index..];
@@ -5788,7 +5793,8 @@ pub const Tag = enum(u8) {
             .config = .{ .@"trailing.arg_values.len" = .@"payload.args_len" },
         },
     };
-    fn Payload(comptime tag: Tag) type {
+    // TODO(pwr): remove pub again - temporary for testing
+    pub fn Payload(comptime tag: Tag) type {
         return @field(encodings, @tagName(tag)).payload;
     }
 
@@ -6516,7 +6522,8 @@ pub const Int = packed struct {
     ty: Index,
     limbs_len: u32,
 
-    const limbs_items_len = @divExact(@sizeOf(Int), @sizeOf(Limb));
+    // TODO(pwr): remove pub again - temporarily for testing
+    pub const limbs_items_len = @divExact(@sizeOf(Int), @sizeOf(Limb));
 };
 
 pub const IntSmall = struct {
@@ -6685,6 +6692,9 @@ pub fn init(ip: *InternPool, gpa: Allocator, available_threads: usize) !void {
 pub fn deinit(ip: *InternPool, gpa: Allocator) void {
     if (debug_state.enable_checks) std.debug.assert(debug_state.intern_pool == null);
 
+    // Export once at the very end to have the full intern pool dump for all modules.
+    if (!ANALYZER) export_air.exportInternPool(ip, gpa);
+
     ip.src_hash_deps.deinit(gpa);
     ip.nav_val_deps.deinit(gpa);
     ip.nav_ty_deps.deinit(gpa);
@@ -6762,6 +6772,13 @@ const debug_state = struct {
 pub fn indexToKey(ip: *const InternPool, index: Index) Key {
     assert(index != .none);
     const unwrapped_index = index.unwrap(ip);
+    if (ANALYZER) {
+        const slice = ip.getLocalShared(unwrapped_index.tid).items.acquire().view().slice();
+        if (unwrapped_index.index >= slice.len) {
+            std.log.warn("TODO: NYI: indexToKey on unknown index: {any}", .{unwrapped_index});
+            return .{ .simple_type = .void };
+        }
+    }
     const item = unwrapped_index.getItem(ip);
     const data = item.data;
     return switch (item.tag) {
@@ -10868,6 +10885,11 @@ fn dumpStatsFallible(ip: *const InternPool, arena: Allocator) anyerror!void {
             items.items(.tag)[0..local.mutate.items.len],
             items.items(.data)[0..local.mutate.items.len],
         ) |tag, data| {
+            if (ANALYZER) {
+                std.log.warn("TODO: NYI: dumpStatsFallible", .{});
+                break; // TODO(pwr): NYI.
+            }
+
             const gop = try counts.getOrPut(tag);
             if (!gop.found_existing) gop.value_ptr.* = .{};
             gop.value_ptr.count += 1;
@@ -11229,6 +11251,11 @@ pub fn dumpGenericInstancesFallible(ip: *const InternPool, allocator: Allocator)
     instances.sort(SortContext{ .values = instances.values() });
     var it = instances.iterator();
     while (it.next()) |entry| {
+        if (ANALYZER) {
+            std.log.warn("TODO: NYI: dumpGenericInstancesFallible", .{});
+            break; // TODO(pwr): NYI.
+        }
+
         const generic_fn_owner_nav = ip.getNav(ip.funcDeclInfo(entry.key_ptr.*).owner_nav);
         try w.print("{} ({}): \n", .{ generic_fn_owner_nav.name.fmt(ip), entry.value_ptr.items.len });
         for (entry.value_ptr.items) |index| {

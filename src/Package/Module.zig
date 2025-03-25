@@ -545,6 +545,7 @@ pub fn createLimited(gpa: Allocator, options: LimitedOptions) Allocator.Error!*P
 /// modules such as ones only used for `@embedFile`, or the root module when
 /// there is no Zig Compilation Unit.
 pub fn getBuiltinDependency(m: Module) *Module {
+    assert(m.deps.values().len > 0);
     const result = m.deps.values()[0];
     assert(result.isBuiltin());
     return result;

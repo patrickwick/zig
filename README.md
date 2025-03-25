@@ -5,6 +5,16 @@ A general-purpose programming language and toolchain for maintaining
 
 https://ziglang.org/
 
+**This Zig modification attempts to provide AIR and InternPool export / import functionalities to:**
+
+* Simplify experimental tool development.
+* Have fast AIR export and import compared to parsing the `--verbose-air` string representation.
+* Faster compile times compared to working directly in the compiler code.
+* **Non-goals:** upstream these changes.
+    * Providing export / import functions for the tagged Zig versions is sufficient for tool development.
+      Tools target stable version anyway, so lagging behind upstream is not an issue.
+    * Don't add additional complexity to the compiler for breaking changes to AIR or InternPool.
+
 ## Documentation
 
 If you are looking at this README file in a source tree, please refer to the
