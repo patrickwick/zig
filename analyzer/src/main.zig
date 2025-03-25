@@ -11,7 +11,7 @@
 const std = @import("std");
 
 const air = @import("air");
-const Air = air.Air;
+const symbolic = @import("symbolic.zig");
 
 pub fn main() !void {
     const stdout = std.io.getStdOut();
@@ -87,6 +87,6 @@ pub fn main() !void {
 
     // Sybolic execution prototype.
     {
-        // TODO(pwr): NYI: recursively descend the tree.
+        symbolic.symbolicExecution(&air_import.air, intern_pool, main_body);
     }
 }

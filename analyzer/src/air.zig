@@ -59,6 +59,8 @@ pub const AirKey = union(enum) {
     unary_operation: UnaryOperation,
     type_and_operand: TypeAndOperand,
     type_and_binary_operation: TypeAndBinaryOperation,
+    block: Block,
+    debug_inline_block: DebugInlineBlock,
 
     trap: NoOperation,
     breakpoint: NoOperation,
@@ -314,6 +316,17 @@ pub const TypeAndBinaryOperation = struct {
     operation: BinaryOperation,
 };
 
+pub const Block = struct {
+    typ: Type,
+    instruction_indexes: []const Instruction.Index,
+};
+
+pub const DebugInlineBlock = struct {
+    typ: Type,
+    instruction_indexes: []const Instruction.Index,
+    function: Operand,
+};
+
 pub const NoOperation = void;
 
 pub const Argument = struct {
@@ -368,6 +381,7 @@ pub const AirExpansion = struct {
     current_instruction_index: Instruction.Index,
     current: Instruction,
 
+    // TODO(pwr): pass a slice of indexes - you don't always want to analyze until the end.
     pub fn init(air: *const Air, ip: *const InternPool, initial_instruction_index: Air.Inst.Index) @This() {
         return .{
             .air = air,
@@ -583,9 +597,33 @@ pub const AirExpansion = struct {
                 };
             },
 
-            .block,
-            .dbg_inline_block,
-            => .unsupported, // TODO(pwr): NYI.
+            .block => key: {
+                const typ = derefType(self, data.ty_pl.ty.toType());
+                const extra = self.air.extraData(Air.Block, data.ty_pl.payload);
+                const instruction_indexes: []const Instruction.Index = self.air.extra[extra.end..][0..extra.data.body_len];
+
+                break :key .{
+                    .block = .{
+                        .typ = typ,
+                        .instruction_indexes = instruction_indexes,
+                    },
+                };
+            },
+
+            .dbg_inline_block => key: {
+                const typ = derefType(self, data.ty_pl.ty.toType());
+                const extra = self.air.extraData(Air.DbgInlineBlock, data.ty_pl.payload);
+                const instruction_indexes: []const Instruction.Index = self.air.extra[extra.end..][0..extra.data.body_len];
+                const function = derefOperand(self, Air.internedToRef(extra.data.func));
+
+                break :key .{
+                    .debug_inline_block = .{
+                        .typ = typ,
+                        .instruction_indexes = instruction_indexes,
+                        .function = function,
+                    },
+                };
+            },
 
             .loop,
             => .unsupported, // TODO(pwr): NYI.
