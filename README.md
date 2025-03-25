@@ -1,19 +1,19 @@
 ![ZIG](https://ziglang.org/img/zig-logo-dynamic.svg)
 
-This Zig modification attempts to provide AIR and InternPool export / import functionalities to:
-
-* Fast AIR export and import compared to parsing the `--verbose-air` string representation.
-* Simplify externa ldevelopment of tooling, static analysis and AIR optimization.
-* Very fast compile times by using the Zig compiler as a static library compared to working directly in the compiler code.
-* **Non-goals:** upstream these changes.
-    * Providing export / import functions for the tagged Zig versions is sufficient for tool development.
-      Tools target stable version anyway, so asynchronous updates are not an issue at all.
-    * No need to add additional complexity to the compiler that need to be changed when there are breaking changes to AIR or InternPool.
-
 A general-purpose programming language and toolchain for maintaining
 **robust**, **optimal**, and **reusable** software.
 
 https://ziglang.org/
+
+**This Zig modification attempts to provide AIR and InternPool export / import functionalities to:**
+
+* Simplify experimental tool development.
+* Have fast AIR export and import compared to parsing the `--verbose-air` string representation.
+* Faster compile times compared to working directly in the compiler code.
+* **Non-goals:** upstream these changes.
+    * Providing export / import functions for the tagged Zig versions is sufficient for tool development.
+      Tools target stable version anyway, so lagging behind upstream is not an issue.
+    * Don't add additional complexity to the compiler for breaking changes to AIR or InternPool.
 
 ## Documentation
 
