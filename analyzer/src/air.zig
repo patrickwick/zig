@@ -1016,6 +1016,7 @@ pub const Operand = union(enum) {
     instruction_index: Instruction.Index,
 };
 
+// This is an example use case to verify that traversing the AIR representation is convenient.
 pub fn symbolicExecution(air: *const Air, intern_pool: *const InternPool, main_body: []const Air.Inst.Index) void {
     var execution = SymbolicExecution.init(air, intern_pool, main_body);
     execution.execute();
@@ -1026,7 +1027,8 @@ const SymbolicExecution = struct {
     intern_pool: *const InternPool,
     body: []const Air.Inst.Index,
     expansion: AirExpansion,
-    writer: @TypeOf(std.io.getStdOut().writer()),
+
+    writer: IndentedWriter(@TypeOf(std.io.getStdOut().writer())),
 
     fn init(air: *const Air, intern_pool: *const InternPool, body: []const Air.Inst.Index) @This() {
         std.debug.assert(body.len > 0);
@@ -1035,87 +1037,144 @@ const SymbolicExecution = struct {
             .intern_pool = intern_pool,
             .body = body,
             .expansion = .init(air, intern_pool, body[0]),
-            .writer = std.io.getStdOut().writer(),
+            .writer = .{ .writer = std.io.getStdOut().writer() },
         };
     }
 
     fn execute(self: *@This()) void {
         errdefer @panic("writer failed");
 
-        var indentation: usize = 0;
-        var instruction = self.expansion.nextInstruction();
-        while (true) : (instruction = self.expansion.nextInstruction()) {
-            indentation += 2;
-            defer indentation -= 2;
-
-            switch (instruction.key) {
-                .conditional_branch => |branch| self.conditionalBranch(branch),
-                .type_and_operand => |op| {
-                    switch (op.tag) {
-                        else => {},
-                    }
-                },
-                // TODO(pwr): expand this for different operations - this nesting is akward.
-                .type_and_binary_operation => |op| {
-                    switch (op.operation.operation) {
-                        else => {},
-                    }
-                },
-                .unary_operation => |op| {
-                    switch (op.operation) {
-                        else => {},
-                    }
-                },
-                .binary_operation => |op| {
-                    switch (op.operation) {
-                        .store, .store_safe => {},
-                        else => {},
-                    }
-                },
-                .call => |call| {
-                    _ = call;
-                },
-                .end_of_instructions => break,
-                else => {},
-            }
+        var inst = self.expansion.nextInstruction();
+        while (true) : (inst = self.expansion.nextInstruction()) {
+            if (!self.instruction(inst)) break;
+            try self.writer.writeAll("\n");
         }
+    }
+
+    fn instruction(self: *@This(), inst: Instruction) bool {
+        errdefer @panic("writer failed");
+
+        try self.writer.print("{any}", .{inst}); // TODO(pwr): remove.
+
+        switch (inst.key) {
+            .conditional_branch => |branch| self.conditionalBranch(branch),
+            .type_and_operand => |op| {
+                switch (op.tag) {
+                    else => {},
+                }
+            },
+            // TODO(pwr): expand this for different operations - this nesting is akward.
+            .type_and_binary_operation => |op| {
+                switch (op.operation.operation) {
+                    else => {},
+                }
+            },
+            .unary_operation => |op| {
+                switch (op.operation) {
+                    else => {},
+                }
+            },
+            .binary_operation => |op| {
+                switch (op.operation) {
+                    .store, .store_safe => {},
+                    else => {},
+                }
+            },
+            .call => |call| {
+                _ = call;
+            },
+            .end_of_instructions => return false,
+            else => {},
+        }
+
+        return true;
     }
 
     fn conditionalBranch(self: *@This(), branch: ConditionalBranch) void {
         errdefer @panic("writer failed");
+        try self.writer.writeAll("\n");
 
+        // Condition.
         try self.writer.writeAll("if (");
-
         switch (branch.operand) {
             .instruction_index => |index| {
-                // TODO: recursion
                 const inst = self.expansion.getInstruction(index);
-                try self.writer.print("  {any}", .{inst});
+                _ = self.instruction(inst);
             },
             .interned => |key| {
-                try self.writer.print("  {any}", .{key});
+                try self.writer.print("{any}", .{key});
             },
         }
+        try self.writer.writeAll(") ");
 
-        try self.writer.writeAll(") {\n");
+        // Then.
+        {
+            try self.writer.writeAll("{\n");
+            defer self.writer.writeAll("}") catch {};
+            self.writer.indentation += 2;
+            defer self.writer.indentation -= 2;
 
-        for (branch.then_indexes) |then| {
-            // TODO: recursion
-            const inst = self.expansion.getInstruction(then);
-            try self.writer.print("  {any}\n", .{inst});
+            for (branch.then_indexes) |then| {
+                const inst = self.expansion.getInstruction(then);
+                _ = self.instruction(inst);
+                try self.writer.writeAll("\n");
+            }
         }
 
-        try self.writer.writeAll("} else {\n");
+        // Else.
+        if (branch.else_indexes.len > 0) {
+            try self.writer.writeAll(" else {\n");
+            defer self.writer.writeAll("}") catch {};
+            self.writer.indentation += 2;
+            defer self.writer.indentation -= 2;
 
-        for (branch.else_indexes) |then| {
-            // TODO: recursion
-            const inst = self.expansion.getInstruction(then);
-            try self.writer.print("  {any}\n", .{inst});
+            for (branch.else_indexes) |then| {
+                const inst = self.expansion.getInstruction(then);
+                _ = self.instruction(inst);
+                try self.writer.writeAll("\n");
+            }
         }
-
-        try self.writer.writeAll("}\n");
     }
 };
+
+fn IndentedWriter(WriterType: type) type {
+    return struct {
+        pub const IndentationCharacter = ' ';
+
+        writer: WriterType,
+        indentation: usize = 0,
+
+        pub fn writeAll(self: @This(), bytes: []const u8) anyerror!void {
+            try self.writer.writeByteNTimes(IndentationCharacter, self.indentation);
+            _ = try self.writer.write(bytes);
+        }
+
+        pub fn print(self: @This(), comptime format: []const u8, args: anytype) anyerror!void {
+            try self.writer.writeByteNTimes(IndentationCharacter, self.indentation);
+            try self.writer.print(format, args);
+        }
+
+        pub fn writeByte(self: @This(), byte: u8) anyerror!void {
+            try self.writer.writeByteNTimes(IndentationCharacter, self.indentation);
+            try self.writer.writeByte(byte);
+        }
+
+        pub fn writeByteNTimes(self: @This(), byte: u8, n: usize) anyerror!void {
+            try self.writer.writeByteNTimes(IndentationCharacter, self.indentation);
+            try self.writer.writeByteNTimes(byte, n);
+        }
+
+        pub fn writeBytesNTimes(self: @This(), bytes: []const u8, n: usize) anyerror!void {
+            try self.writer.writeByteNTimes(IndentationCharacter, self.indentation);
+            try self.writer.writeBytesNTimes(bytes, n);
+        }
+
+        pub inline fn writeInt(self: @This(), comptime T: type, value: T, endian: std.builtin.Endian) anyerror!void {
+            try self.writer.writeByteNTimes(IndentationCharacter, self.indentation);
+            try self.writer.writeInt(T, value, endian);
+        }
+    };
+}
 
 const t = std.testing;
 
