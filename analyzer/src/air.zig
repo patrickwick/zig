@@ -315,6 +315,105 @@ pub const UnaryOperation = struct {
 };
 
 pub const TypeAndOperand = struct {
+    // NOTE: **not** using `Air.Inst.Tag` direclty to decouple enum values from compiler.
+    pub const Tag = enum {
+        invalid,
+
+        not,
+        bitcast,
+        load,
+        fptrunc,
+        fpext,
+        intcast,
+        intcast_safe,
+        trunc,
+        optional_payload,
+        optional_payload_ptr,
+        optional_payload_ptr_set,
+        errunion_payload_ptr_set,
+        wrap_optional,
+        unwrap_errunion_payload,
+        unwrap_errunion_err,
+        unwrap_errunion_payload_ptr,
+        unwrap_errunion_err_ptr,
+        wrap_errunion_payload,
+        wrap_errunion_err,
+        slice_ptr,
+        slice_len,
+        ptr_slice_len_ptr,
+        ptr_slice_ptr_ptr,
+        struct_field_ptr_index_0,
+        struct_field_ptr_index_1,
+        struct_field_ptr_index_2,
+        struct_field_ptr_index_3,
+        array_to_slice,
+        float_from_int,
+        splat,
+        int_from_float,
+        int_from_float_optimized,
+        get_union_tag,
+        clz,
+        ctz,
+        popcount,
+        byte_swap,
+        bit_reverse,
+        abs,
+        error_set_has_value,
+        addrspace_cast,
+        c_va_arg,
+        c_va_copy,
+
+        pub fn from(tag: Air.Inst.Tag) @This() {
+            return switch (tag) {
+                .not => .not,
+                .bitcast => .bitcast,
+                .load => .load,
+                .fptrunc => .fptrunc,
+                .fpext => .fpext,
+                .intcast => .intcast,
+                .intcast_safe => .intcast_safe,
+                .trunc => .trunc,
+                .optional_payload => .optional_payload,
+                .optional_payload_ptr => .optional_payload_ptr,
+                .optional_payload_ptr_set => .optional_payload_ptr_set,
+                .errunion_payload_ptr_set => .errunion_payload_ptr_set,
+                .wrap_optional => .wrap_optional,
+                .unwrap_errunion_payload => .unwrap_errunion_payload,
+                .unwrap_errunion_err => .unwrap_errunion_err,
+                .unwrap_errunion_payload_ptr => .unwrap_errunion_payload_ptr,
+                .unwrap_errunion_err_ptr => .unwrap_errunion_err_ptr,
+                .wrap_errunion_payload => .wrap_errunion_payload,
+                .wrap_errunion_err => .wrap_errunion_err,
+                .slice_ptr => .slice_ptr,
+                .slice_len => .slice_len,
+                .ptr_slice_len_ptr => .ptr_slice_len_ptr,
+                .ptr_slice_ptr_ptr => .ptr_slice_ptr_ptr,
+                .struct_field_ptr_index_0 => .struct_field_ptr_index_0,
+                .struct_field_ptr_index_1 => .struct_field_ptr_index_1,
+                .struct_field_ptr_index_2 => .struct_field_ptr_index_2,
+                .struct_field_ptr_index_3 => .struct_field_ptr_index_3,
+                .array_to_slice => .array_to_slice,
+                .float_from_int => .float_from_int,
+                .splat => .splat,
+                .int_from_float => .int_from_float,
+                .int_from_float_optimized => .int_from_float_optimized,
+                .get_union_tag => .get_union_tag,
+                .clz => .clz,
+                .ctz => .ctz,
+                .popcount => .popcount,
+                .byte_swap => .byte_swap,
+                .bit_reverse => .bit_reverse,
+                .abs => .abs,
+                .error_set_has_value => .error_set_has_value,
+                .addrspace_cast => .addrspace_cast,
+                .c_va_arg => .c_va_arg,
+                .c_va_copy => .c_va_copy,
+                else => .invalid,
+            };
+        }
+    };
+
+    tag: Tag,
     typ: Type,
     operand: Operand,
 };
@@ -627,6 +726,7 @@ pub const AirExpansion = struct {
 
                 break :key .{
                     .type_and_operand = .{
+                        .tag = .from(tag),
                         .typ = typ,
                         .operand = operand,
                     },
@@ -926,6 +1026,7 @@ const SymbolicExecution = struct {
     intern_pool: *const InternPool,
     body: []const Air.Inst.Index,
     expansion: AirExpansion,
+    writer: @TypeOf(std.io.getStdOut().writer()),
 
     fn init(air: *const Air, intern_pool: *const InternPool, body: []const Air.Inst.Index) @This() {
         std.debug.assert(body.len > 0);
@@ -934,13 +1035,12 @@ const SymbolicExecution = struct {
             .intern_pool = intern_pool,
             .body = body,
             .expansion = .init(air, intern_pool, body[0]),
+            .writer = std.io.getStdOut().writer(),
         };
     }
 
     fn execute(self: *@This()) void {
         errdefer @panic("writer failed");
-        const stdout = std.io.getStdOut();
-        const writer = stdout.writer();
 
         var indentation: usize = 0;
         var instruction = self.expansion.nextInstruction();
@@ -949,50 +1049,71 @@ const SymbolicExecution = struct {
             defer indentation -= 2;
 
             switch (instruction.key) {
-                .conditional_branch => |cond_br| {
-                    try writer.writeAll("if (");
-
-                    switch (cond_br.operand) {
-                        .instruction_index => |index| {
-                            // TODO: recursion
-                            const inst = self.expansion.getInstruction(index);
-                            try writer.print("  {any}", .{inst});
-                        },
-                        .interned => |key| {
-                            try writer.print("  {any}", .{key});
-                        },
+                .conditional_branch => |branch| self.conditionalBranch(branch),
+                .type_and_operand => |op| {
+                    switch (op.tag) {
+                        else => {},
                     }
-
-                    try writer.writeAll(") {\n");
-
-                    for (cond_br.then_indexes) |then| {
-                        // TODO: recursion
-                        const inst = self.expansion.getInstruction(then);
-                        try writer.print("  {any}\n", .{inst});
+                },
+                // TODO(pwr): expand this for different operations - this nesting is akward.
+                .type_and_binary_operation => |op| {
+                    switch (op.operation.operation) {
+                        else => {},
                     }
-
-                    try writer.writeAll("} else {\n");
-
-                    for (cond_br.else_indexes) |then| {
-                        // TODO: recursion
-                        const inst = self.expansion.getInstruction(then);
-                        try writer.print("  {any}\n", .{inst});
+                },
+                .unary_operation => |op| {
+                    switch (op.operation) {
+                        else => {},
                     }
-
-                    try writer.writeAll("}\n");
                 },
                 .binary_operation => |op| {
                     switch (op.operation) {
-                        .store, .store_safe => {
-                            // std.log.info("{any} = {any}", .{ op.left, op.right });
-                        },
+                        .store, .store_safe => {},
                         else => {},
                     }
+                },
+                .call => |call| {
+                    _ = call;
                 },
                 .end_of_instructions => break,
                 else => {},
             }
         }
+    }
+
+    fn conditionalBranch(self: *@This(), branch: ConditionalBranch) void {
+        errdefer @panic("writer failed");
+
+        try self.writer.writeAll("if (");
+
+        switch (branch.operand) {
+            .instruction_index => |index| {
+                // TODO: recursion
+                const inst = self.expansion.getInstruction(index);
+                try self.writer.print("  {any}", .{inst});
+            },
+            .interned => |key| {
+                try self.writer.print("  {any}", .{key});
+            },
+        }
+
+        try self.writer.writeAll(") {\n");
+
+        for (branch.then_indexes) |then| {
+            // TODO: recursion
+            const inst = self.expansion.getInstruction(then);
+            try self.writer.print("  {any}\n", .{inst});
+        }
+
+        try self.writer.writeAll("} else {\n");
+
+        for (branch.else_indexes) |then| {
+            // TODO: recursion
+            const inst = self.expansion.getInstruction(then);
+            try self.writer.print("  {any}\n", .{inst});
+        }
+
+        try self.writer.writeAll("}\n");
     }
 };
 
