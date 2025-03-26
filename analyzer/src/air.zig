@@ -1059,6 +1059,7 @@ const SymbolicExecution = struct {
         switch (inst.key) {
             .conditional_branch => |branch| self.conditionalBranch(branch),
             .type_and_operand => |op| {
+                valueOrRecurse(self, op.operand);
                 switch (op.tag) {
                     else => {},
                 }
@@ -1068,18 +1069,15 @@ const SymbolicExecution = struct {
                 switch (op.operation.operation) {
                     else => {},
                 }
+                self.binaryOperation(op.operation);
             },
             .unary_operation => |op| {
+                valueOrRecurse(self, op.operand);
                 switch (op.operation) {
                     else => {},
                 }
             },
-            .binary_operation => |op| {
-                switch (op.operation) {
-                    .store, .store_safe => {},
-                    else => {},
-                }
-            },
+            .binary_operation => |op| self.binaryOperation(op),
             .call => |call| {
                 _ = call;
             },
@@ -1090,21 +1088,150 @@ const SymbolicExecution = struct {
         return true;
     }
 
+    fn binaryOperation(self: *@This(), binary_operation: BinaryOperation) void {
+        errdefer @panic("writer failed");
+        switch (binary_operation.operation) {
+            .add,
+            .add_optimized,
+            .add_safe,
+            .add_wrap,
+            .add_sat,
+            => {
+                valueOrRecurse(self, binary_operation.left);
+                try self.writer.writeAll(" + ");
+                valueOrRecurse(self, binary_operation.right);
+            },
+
+            .sub,
+            .sub_optimized,
+            .sub_safe,
+            .sub_wrap,
+            .sub_sat,
+            => {
+                valueOrRecurse(self, binary_operation.left);
+                try self.writer.writeAll(" - ");
+                valueOrRecurse(self, binary_operation.right);
+            },
+
+            .mul,
+            .mul_optimized,
+            .mul_safe,
+            .mul_wrap,
+            .mul_sat,
+            => {
+                valueOrRecurse(self, binary_operation.left);
+                try self.writer.writeAll(" * ");
+                valueOrRecurse(self, binary_operation.right);
+            },
+
+            .div_float,
+            .div_trunc,
+            .div_floor,
+            .div_exact,
+            => {
+                valueOrRecurse(self, binary_operation.left);
+                try self.writer.writeAll(" / ");
+                valueOrRecurse(self, binary_operation.right);
+            },
+
+            .rem,
+            .mod,
+            .bit_and,
+            .bit_or,
+            .xor,
+            => {},
+
+            .cmp_neq, .cmp_neq_optimized => {
+                valueOrRecurse(self, binary_operation.left);
+                try self.writer.writeAll(" != ");
+                valueOrRecurse(self, binary_operation.right);
+            },
+            .cmp_eq, .cmp_eq_optimized => {
+                valueOrRecurse(self, binary_operation.left);
+                try self.writer.writeAll(" == ");
+                valueOrRecurse(self, binary_operation.right);
+            },
+            .cmp_gte, .cmp_gte_optimized => {
+                valueOrRecurse(self, binary_operation.left);
+                try self.writer.writeAll(" >= ");
+                valueOrRecurse(self, binary_operation.right);
+            },
+            .cmp_gt, .cmp_gt_optimized => {
+                valueOrRecurse(self, binary_operation.left);
+                try self.writer.writeAll(" > ");
+                valueOrRecurse(self, binary_operation.right);
+            },
+            .cmp_lte, .cmp_lte_optimized => {
+                valueOrRecurse(self, binary_operation.left);
+                try self.writer.writeAll(" <= ");
+                valueOrRecurse(self, binary_operation.right);
+            },
+            .cmp_lt, .cmp_lt_optimized => {
+                valueOrRecurse(self, binary_operation.left);
+                try self.writer.writeAll(" < ");
+                valueOrRecurse(self, binary_operation.right);
+            },
+
+            .bool_and,
+            .bool_or,
+            => {},
+
+            .store, .store_safe => {},
+
+            .array_elem_val,
+            .slice_elem_val,
+            .ptr_elem_val,
+            .shl,
+            .shl_exact,
+            .shl_sat,
+            .shr,
+            .shr_exact,
+            .set_union_tag,
+            .min,
+            .max,
+            .div_float_optimized,
+            .div_trunc_optimized,
+            .div_floor_optimized,
+            .div_exact_optimized,
+            .rem_optimized,
+            .mod_optimized,
+            .memcpy,
+            .memset,
+            .memset_safe,
+            => {},
+
+            .invalid => std.log.err("invalid binary operation", .{}),
+        }
+    }
+
+    fn valueOrRecurse(self: *@This(), operand: Operand) void {
+        errdefer @panic("writer failed");
+        switch (operand) {
+            .instruction_index => |index| {
+                const inst = self.expansion.getInstruction(index);
+                _ = self.instruction(inst);
+            },
+            .interned => |key| {
+                switch (key) {
+                    .int => switch (key.int.storage) {
+                        inline else => |value| try self.writer.print("{any}", .{value}),
+                    },
+                    .float => switch (key.float.storage) {
+                        inline else => |value| try self.writer.print("{any}", .{value}),
+                    },
+                    else => try self.writer.print("{any}", .{key}),
+                }
+            },
+        }
+    }
+
     fn conditionalBranch(self: *@This(), branch: ConditionalBranch) void {
         errdefer @panic("writer failed");
         try self.writer.writeAll("\n");
 
         // Condition.
         try self.writer.writeAll("if (");
-        switch (branch.operand) {
-            .instruction_index => |index| {
-                const inst = self.expansion.getInstruction(index);
-                _ = self.instruction(inst);
-            },
-            .interned => |key| {
-                try self.writer.print("{any}", .{key});
-            },
-        }
+        self.valueOrRecurse(branch.operand);
         try self.writer.writeAll(") ");
 
         // Then.
