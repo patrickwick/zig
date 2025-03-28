@@ -1012,7 +1012,7 @@ pub const Key = InternPool.Key;
 pub const Type = InternPool.Key;
 
 pub const Operand = union(enum) {
-    interned: Key,
+    interned: Key, // TODO(pwr): decouple.
     instruction_index: Instruction.Index,
 };
 
@@ -1054,9 +1054,10 @@ const SymbolicExecution = struct {
     fn instruction(self: *@This(), inst: Instruction) bool {
         errdefer @panic("writer failed");
 
-        try self.writer.print("{any}", .{inst}); // TODO(pwr): remove.
+        // try self.writer.print("{any}", .{inst}); // TODO(pwr): remove.
 
         switch (inst.key) {
+            .end_of_instructions => return false,
             .conditional_branch => |branch| self.conditionalBranch(branch),
             .type_and_operand => |op| {
                 valueOrRecurse(self, op.operand);
@@ -1074,15 +1075,67 @@ const SymbolicExecution = struct {
             .unary_operation => |op| {
                 valueOrRecurse(self, op.operand);
                 switch (op.operation) {
-                    else => {},
+                    .is_null,
+                    .is_non_null,
+                    .is_null_ptr,
+                    .is_non_null_ptr,
+                    .is_err,
+                    .is_non_err,
+                    .is_err_ptr,
+                    .is_non_err_ptr,
+                    .ret,
+                    .ret_safe,
+                    .ret_load,
+                    .is_named_enum_value,
+                    .tag_name,
+                    .error_name,
+                    .sqrt,
+                    .sin,
+                    .cos,
+                    .tan,
+                    .exp,
+                    .exp2,
+                    .log,
+                    .log2,
+                    .log10,
+                    .floor,
+                    .ceil,
+                    .round,
+                    .trunc_float,
+                    .neg,
+                    .neg_optimized,
+                    .cmp_lt_errors_len,
+                    .set_err_return_trace,
+                    .c_va_end,
+                    => try self.writer.print("{any}", .{op}),
+
+                    .invalid => std.log.err("invalid unary operation: {any}", .{op}),
                 }
             },
             .binary_operation => |op| self.binaryOperation(op),
-            .call => |call| {
-                _ = call;
+            .struct_field_val => |op| {
+                try self.writer.print("{any}", .{op});
             },
-            .end_of_instructions => return false,
-            else => {},
+            .struct_field_ptr => |op| {
+                try self.writer.print("{any}", .{op});
+            },
+            .call => |call| {
+                try self.writer.print("{any}", .{call});
+            },
+            .block => |op| {
+                try self.writer.writeAll("{\n");
+                defer self.writer.writeAll("\n}\n") catch {};
+
+                self.writer.increaseIndent();
+                defer self.writer.decreaseIndent();
+
+                for (op.instruction_indexes) |index| _ = self.instruction(self.expansion.getInstruction(index));
+            },
+            .block_return => |op| {
+                try self.writer.print("{any}", .{op});
+            },
+            .unreach => try self.writer.writeAll("unreachable;"),
+            else => try self.writer.print("{any}", .{inst.key}),
         }
 
         return true;
@@ -1125,9 +1178,13 @@ const SymbolicExecution = struct {
             },
 
             .div_float,
+            .div_float_optimized,
             .div_trunc,
+            .div_trunc_optimized,
             .div_floor,
+            .div_floor_optimized,
             .div_exact,
+            .div_exact_optimized,
             => {
                 valueOrRecurse(self, binary_operation.left);
                 try self.writer.writeAll(" / ");
@@ -1135,11 +1192,29 @@ const SymbolicExecution = struct {
             },
 
             .rem,
+            .rem_optimized,
+            => {}, // TODO(pwr): NYI.
+
             .mod,
-            .bit_and,
-            .bit_or,
-            .xor,
-            => {},
+            .mod_optimized,
+            => {
+                valueOrRecurse(self, binary_operation.left);
+                try self.writer.writeAll(" % ");
+                valueOrRecurse(self, binary_operation.right);
+            },
+
+            .bit_and => {
+                valueOrRecurse(self, binary_operation.left);
+                try self.writer.writeAll(" & ");
+                valueOrRecurse(self, binary_operation.right);
+            },
+            .bit_or => {
+                valueOrRecurse(self, binary_operation.left);
+                try self.writer.writeAll(" | ");
+                valueOrRecurse(self, binary_operation.right);
+            },
+
+            .xor => {}, // TODO(pwr): NYI.
 
             .cmp_neq, .cmp_neq_optimized => {
                 valueOrRecurse(self, binary_operation.left);
@@ -1172,29 +1247,51 @@ const SymbolicExecution = struct {
                 valueOrRecurse(self, binary_operation.right);
             },
 
-            .bool_and,
-            .bool_or,
-            => {},
+            .bool_and => {
+                valueOrRecurse(self, binary_operation.left);
+                try self.writer.writeAll(" and ");
+                valueOrRecurse(self, binary_operation.right);
+            },
+            .bool_or => {
+                valueOrRecurse(self, binary_operation.left);
+                try self.writer.writeAll(" or ");
+                valueOrRecurse(self, binary_operation.right);
+            },
 
-            .store, .store_safe => {},
+            .store,
+            .store_safe,
+            => {
+                valueOrRecurse(self, binary_operation.left);
+                try self.writer.writeAll(" = ");
+                valueOrRecurse(self, binary_operation.right);
+            },
 
             .array_elem_val,
             .slice_elem_val,
             .ptr_elem_val,
+
             .shl,
             .shl_exact,
             .shl_sat,
+            => {
+                valueOrRecurse(self, binary_operation.left);
+                try self.writer.writeAll(" << ");
+                valueOrRecurse(self, binary_operation.right);
+            },
+
             .shr,
             .shr_exact,
+            => {
+                valueOrRecurse(self, binary_operation.left);
+                try self.writer.writeAll(" >> ");
+                valueOrRecurse(self, binary_operation.right);
+            },
+
             .set_union_tag,
+
             .min,
             .max,
-            .div_float_optimized,
-            .div_trunc_optimized,
-            .div_floor_optimized,
-            .div_exact_optimized,
-            .rem_optimized,
-            .mod_optimized,
+
             .memcpy,
             .memset,
             .memset_safe,
@@ -1212,14 +1309,68 @@ const SymbolicExecution = struct {
                 _ = self.instruction(inst);
             },
             .interned => |key| {
+                // TODO(pwr): convert InternPool.Key to own Type and Value types to decouple from the compiler types.
                 switch (key) {
+                    .int_type => try self.writer.print("*{s}int{d}", .{
+                        switch (key.int_type.signedness) {
+                            .signed => "",
+                            .unsigned => "u",
+                        },
+                        key.int_type.bits,
+                    }),
+
+                    .ptr_type => {
+                        const child_type = self.intern_pool.indexToKey(key.ptr_type.child);
+
+                        // TODO(pwr): use other key.ptr_type fields on demand.
+                        try self.writer.print("*{any}", .{
+                            child_type, // TODO(pwr): create type mapping function.
+                        });
+                    },
+
+                    .array_type,
+                    .vector_type,
+                    .opt_type,
+                    .anyframe_type,
+                    .error_union_type,
+                    .simple_type,
+                    .struct_type,
+                    .tuple_type,
+                    .union_type,
+                    .opaque_type,
+                    .enum_type,
+                    .func_type,
+                    .error_set_type,
+                    .inferred_error_set_type,
+                    .undef,
+                    .simple_value,
+                    .variable,
+                    .@"extern",
+                    .func,
+                    => try self.writer.print("{any}", .{key}),
+
                     .int => switch (key.int.storage) {
                         inline else => |value| try self.writer.print("{any}", .{value}),
                     },
+
+                    .err,
+                    .error_union,
+                    .enum_literal,
+                    .enum_tag,
+                    .empty_enum_value,
+                    => try self.writer.print("{any}", .{key}),
+
                     .float => switch (key.float.storage) {
                         inline else => |value| try self.writer.print("{any}", .{value}),
                     },
-                    else => try self.writer.print("{any}", .{key}),
+
+                    .ptr,
+                    .slice,
+                    .opt,
+                    .aggregate,
+                    .un,
+                    .memoized_call,
+                    => try self.writer.print("{any}", .{key}),
                 }
             },
         }
@@ -1238,8 +1389,8 @@ const SymbolicExecution = struct {
         {
             try self.writer.writeAll("{\n");
             defer self.writer.writeAll("}") catch {};
-            self.writer.indentation += 2;
-            defer self.writer.indentation -= 2;
+            self.writer.increaseIndent();
+            defer self.writer.decreaseIndent();
 
             for (branch.then_indexes) |then| {
                 const inst = self.expansion.getInstruction(then);
@@ -1252,8 +1403,8 @@ const SymbolicExecution = struct {
         if (branch.else_indexes.len > 0) {
             try self.writer.writeAll(" else {\n");
             defer self.writer.writeAll("}") catch {};
-            self.writer.indentation += 2;
-            defer self.writer.indentation -= 2;
+            self.writer.increaseIndent();
+            defer self.writer.decreaseIndent();
 
             for (branch.else_indexes) |then| {
                 const inst = self.expansion.getInstruction(then);
@@ -1267,9 +1418,18 @@ const SymbolicExecution = struct {
 fn IndentedWriter(WriterType: type) type {
     return struct {
         pub const IndentationCharacter = ' ';
+        pub const ShiftWidth = 2;
 
         writer: WriterType,
         indentation: usize = 0,
+
+        pub fn increaseIndent(self: *@This()) void {
+            self.indentation += ShiftWidth;
+        }
+
+        pub fn decreaseIndent(self: *@This()) void {
+            self.indentation = @max(ShiftWidth, self.indentation) - ShiftWidth;
+        }
 
         pub fn writeAll(self: @This(), bytes: []const u8) anyerror!void {
             try self.writer.writeByteNTimes(IndentationCharacter, self.indentation);
